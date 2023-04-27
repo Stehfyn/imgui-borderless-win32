@@ -1,4 +1,4 @@
 [submodule "imgui"]
-	path = imgui
+	path = imgui-borderless-win32/imgui
 	url = https://github.com/ocornut/imgui
 	branch = docking
