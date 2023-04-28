@@ -22,6 +22,10 @@
 #pragma comment( lib, "msimg32.lib" )
 
 #include "swcadef.h" 
+#define STB_IMAGE_IMPLEMENTATION
+#define GL_CLAMP_TO_EDGE 0x812F
+#include "stb_image.h"
+
 #include <atomic>
 #include <vector>
 #include <iostream>
@@ -38,6 +42,7 @@ static HGLRC            g_hRC;
 static WGL_WindowData   g_MainWindow;
 static int              g_Width;
 static int              g_Height;
+static bool             g_Focused;
 
 struct ATOMIC_RECTVA
 {
@@ -88,6 +93,39 @@ static void Hook_Renderer_SwapBuffers(ImGuiViewport* viewport, void*)
         ::SwapBuffers(data->hDC);
 }
 
+bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_width, int* out_height)
+{
+    // Load from file
+    int image_width = 0;
+    int image_height = 0;
+    unsigned char* image_data = stbi_load(filename, &image_width, &image_height, NULL, 4);
+    if (image_data == NULL)
+        return false;
+
+    // Create a OpenGL texture identifier
+    GLuint image_texture;
+    glGenTextures(1, &image_texture);
+    glBindTexture(GL_TEXTURE_2D, image_texture);
+
+    // Setup filtering parameters for display
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); // This is required on WebGL for non power-of-two textures
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); // Same
+
+    // Upload pixels into texture
+#if defined(GL_UNPACK_ROW_LENGTH) && !defined(__EMSCRIPTEN__)
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+#endif
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image_width, image_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
+    stbi_image_free(image_data);
+
+    *out_texture = image_texture;
+    *out_width = image_width;
+    *out_height = image_height;
+
+    return true;
+}
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPWSTR    lpCmdLine,
@@ -166,10 +204,28 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         ImFontConfig fontConfig;
         fontConfig.FontDataOwnedByAtlas = false;
         //ImFont* robotoFont = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoRegular, sizeof(g_RobotoRegular), 20.0f, &fontConfig);
-        ImFont* myriadPro = io.Fonts->AddFontFromFileTTF("../res/MyriadPro-Light.ttf", 20.0f);
+        ImFont* myriadPro = io.Fonts->AddFontFromFileTTF("../res/MyriadPro-Light.ttf", 16.0f);
         //io.FontDefault = robotoFont;
         io.FontDefault = myriadPro;
         io.Fonts->Build();
+
+        int my_image_width = 0;
+        int my_image_height = 0;
+        GLuint my_image_texture = 0;
+        bool ret = LoadTextureFromFile("../res/unr-active.png", &my_image_texture, &my_image_width, &my_image_height);
+        IM_ASSERT(ret);
+
+        int my_inactive_width = 0;
+        int my_inactive_height = 0;
+        GLuint my_inactive_texture = 0;
+        ret = LoadTextureFromFile("../res/unr-inactive.png", &my_inactive_texture, &my_inactive_width, &my_inactive_height);
+        IM_ASSERT(ret);
+
+        int my_close_width = 0;
+        int my_close_height = 0;
+        GLuint my_close_texture = 0;
+        ret = LoadTextureFromFile("../res/close.png", &my_close_texture, &my_close_width, &my_close_height);
+        IM_ASSERT(ret);
 
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
         {
@@ -216,9 +272,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
             //update window rects
-            HWND vp = (HWND)ImGui::GetMainViewport()->PlatformHandle;
+            ImGuiViewport* vp = ImGui::GetMainViewport();
+            HWND handle = (HWND)vp->PlatformHandle;
             RECT r;
-            GetWindowRect(vp, &r);
+            GetWindowRect(handle, &r);
             ImVec2 origin = { (float)r.left, (float)r.top };
 
             g_Origin.store(origin);
@@ -232,12 +289,39 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 ImVec2 size = ImGui::GetWindowSize();
                 RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
                 WindowRects.push_back(rect);
+
+                float offset = ImGui::GetFrameHeight() * .25f/2.0f;
+                ImVec2 start = ImGui::GetCursorScreenPos();
+                start.y += offset;
+                ImVec2 end = { ((start.x + ImGui::GetFrameHeight()) * .75f) + offset/2.0f, ((start.y + ImGui::GetFrameHeight()) * .75f) + offset/2.0f};
+                
+                if (g_Focused) ImGui::GetWindowDrawList()->AddImage((void*)(intptr_t)my_image_texture, start, end);
+                else ImGui::GetWindowDrawList()->AddImage((void*)(intptr_t)my_inactive_texture, start, end);
+
+                ImGui::Dummy({(float)end.x - start.x, 0});
                 if (ImGui::BeginMenu("File"))
                 {
                     if (ImGui::MenuItem("New"))
                     {
                     }
                     ImGui::EndMenu();
+                }
+                if (ImGui::BeginMenu("Edit"))
+                {
+                    ImGui::EndMenu();
+                }
+                if (ImGui::BeginMenu("Settings"))
+                {
+                    ImGui::EndMenu();
+                }
+                if (ImGui::BeginMenu("Help"))
+                {
+                    ImGui::EndMenu();
+                }
+                ImGui::SetCursorPos({ ImGui::GetWindowWidth() - ImGui::GetFrameHeight() - ImGui::GetStyle().FramePadding.x, ImGui::GetCursorPos().y});
+                if (ImGui::ImageButton((void*)(intptr_t)my_close_texture, {ImGui::GetFrameHeight() - ImGui::GetStyle().FramePadding.x, ImGui::GetFrameHeight() - ImGui::GetStyle().FramePadding.x}))
+                {
+                    PostMessage(hwnd, WM_QUIT, 0, 0);
                 }
             }
             ImGui::EndMainMenuBar();
@@ -335,7 +419,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             {
                 std::cout << window->Name << std::endl;
 
-                if ((!(std::string(window->Name).find("Dock") != std::string::npos)) ||
+
+                if ((!(std::string(window->Name).find("Default") != std::string::npos) &&
+                    (!(std::string(window->Name).find("Dock") != std::string::npos))) ||
                     (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
                 {
                     ImVec2 pos = window->Pos;
@@ -469,6 +555,13 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SWP_FRAMECHANGED);
         return 0;
     }
+    case WM_SETFOCUS:
+        g_Focused = true;
+        break;
+
+    case WM_KILLFOCUS:
+        g_Focused = false;
+        break;
     case WM_NCCALCSIZE: {
         if (wParam == TRUE && true) {
             auto& params = *reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);

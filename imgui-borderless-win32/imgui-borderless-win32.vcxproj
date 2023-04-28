@@ -71,16 +71,16 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <IncludePath>$(ProjectDir)\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)\imgui;$(ProjectDir)\stb;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <IncludePath>$(ProjectDir)\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)\imgui;$(ProjectDir)\stb;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(ProjectDir)\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)\imgui;$(ProjectDir)\stb;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(ProjectDir)\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)\imgui;$(ProjectDir)\stb;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -154,6 +154,7 @@
     <ClInclude Include="imgui\imstb_textedit.h" />
     <ClInclude Include="imgui\imstb_truetype.h" />
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="stb\stb_image.h" />
     <ClInclude Include="swcadef.h" />
     <ClInclude Include="targetver.h" />
   </ItemGroup>
