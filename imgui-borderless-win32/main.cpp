@@ -319,6 +319,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 ImGui::End();
             }
             // update window rects
+            std::cout <<  "=========" << std::endl;
+            for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
+            {
+                std::cout << window->Name << std::endl;
+
+                if ((!(std::string(window->Name).find("Dock") != std::string::npos)) ||
+                    (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
+                {
+                    ImVec2 pos = window->Pos;
+                    ImVec2 size = window->Size;
+                    RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
+                    WindowRects.push_back(rect);
+                }
+            }
+            std::cout << "=========" << std::endl;
             ATOMIC_RECTVA updated;
             for (RECT rect : WindowRects)
             {
@@ -481,26 +496,17 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 bottom = 0b1000,
             };
             ImVec2 origin = ImVec2(g_Origin);
-            std::cout << "ORIGIN: " << "( " << origin.x << ", " << origin.y << ") ";
-            std::cout << "( " << cursor.x << ", " << cursor.y << ") ";
-            std::cout << "RECTS: ";
 
-            bool leave = false;
             ATOMIC_RECTVA atomic_rects = ATOMIC_RECTVA(g_ImGuiWindows);
             for (unsigned int i = 0; i < atomic_rects.size; ++i)
             {
                 RECT r = atomic_rects.rects[i];
-                std::cout << "( " << r.left << ", " << r.top << ")" << " ( " << r.right << ", " << r.bottom << ") ";
                 if (PtInRect(&r, cursor))
                 {
-                    leave = true;
                     return HTCLIENT;
-                    break;
                 }
             }
-            
-            std::cout << std::endl;
-            if (leave) break;
+
             const auto result =
                 left * (cursor.x < (window.left + border.x)) |
                 right * (cursor.x >= (window.right - border.x)) |
