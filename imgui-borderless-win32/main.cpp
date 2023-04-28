@@ -112,7 +112,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         HWND hwnd = ::CreateWindowExW(0, wcx.lpszClassName, L"Dear ImGui Win32+OpenGL3 Example", WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, 100, 100, 1280, 800, NULL, NULL, wcx.hInstance, NULL);
 
         static const MARGINS shadow_state[2]{ { 0,0,0,0 },{ 1,1,1,1 } };
-        ::DwmExtendFrameIntoClientArea(hwnd, &shadow_state[true]);
+        static const MARGINS chonk = { 0,0,0,1 };
+        //::DwmExtendFrameIntoClientArea(hwnd, &shadow_state[true]);
+        ::DwmExtendFrameIntoClientArea(hwnd, &chonk);
 
         static const auto SetWindowCompositionAttribute =
             reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowCompositionAttribute"));
@@ -208,10 +210,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             GetWindowRect(vp, &r);
             ImVec2 origin = { (float)r.left, (float)r.top };
 
-            g_Origin.exchange(origin);
+            g_Origin.store(origin);
             {
                 ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
             }
+
             if (ImGui::BeginMainMenuBar())
             {
                 ImVec2 pos = ImGui::GetWindowPos();
@@ -235,8 +238,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
             if (show_demo_window)
             { 
-                ImGui::ShowDemoWindow(&show_demo_window);
+                ImVec2 pos;
+                ImVec2 size;
+
+                ImGui::ShowDemoWindow(&show_demo_window, &pos, &size);
+                RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
+                WindowRects.push_back(rect);
             }
+
             ImGui::PopStyleColor();
             // 2. Show a simple window that we create ourselves. We use a Begin/End pair to create a named window.
             {
@@ -288,7 +297,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                     ImGui::ColorPicker4("##picker", (float*)&color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
                     int gradient_col = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
                     //::MessageBoxA(nullptr, std::string(std::to_string(gradient_col)).c_str(), "Unhandled Exception", MB_OK | MB_ICONERROR);
-                    std::cout << color.x << " " << color.y << " " << color.z << " " << color.w << std::endl;
                     std::string(std::to_string(gradient_col));
                     if (gradient_col != last_gradient_col)
                     {
@@ -322,7 +330,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 updated.rects[updated.size] = rect;
                 updated.size += 1;
             }
-            g_ImGuiWindows.exchange(updated);
+            g_ImGuiWindows.store(updated);
             
 
             
@@ -477,13 +485,13 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 top = 0b0100,
                 bottom = 0b1000,
             };
-            ImVec2 origin = g_Origin.load();
+            ImVec2 origin = ImVec2(g_Origin);
             std::cout << "ORIGIN: " << "( " << origin.x << ", " << origin.y << ") ";
             std::cout << "( " << cursor.x << ", " << cursor.y << ") ";
             std::cout << "RECTS: ";
 
             bool leave = false;
-            ATOMIC_RECTVA atomic_rects = g_ImGuiWindows.load();
+            ATOMIC_RECTVA atomic_rects = ATOMIC_RECTVA(g_ImGuiWindows);
             for (unsigned int i = 0; i < atomic_rects.size; ++i)
             {
                 RECT r = atomic_rects.rects[i];
@@ -491,6 +499,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 if (PtInRect(&r, cursor))
                 {
                     leave = true;
+                    return HTCLIENT;
                     break;
                 }
             }
