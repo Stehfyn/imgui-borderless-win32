@@ -238,12 +238,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
             if (show_demo_window)
             { 
-                ImVec2 pos;
-                ImVec2 size;
-
-                ImGui::ShowDemoWindow(&show_demo_window, &pos, &size);
-                RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
-                WindowRects.push_back(rect);
+                ImGui::ShowDemoWindow(&show_demo_window);
             }
 
             ImGui::PopStyleColor();
