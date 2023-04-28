@@ -145,6 +145,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;       // Enable Docking
         //io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;     // Enable Multi-Viewport / Platform Windows
 
+        
+
         // Setup Dear ImGui style
         ImGui::StyleColorsDark();
         //ImGui::StyleColorsClassic();
@@ -160,6 +162,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         // Setup Platform/Renderer backends
         ImGui_ImplWin32_InitForOpenGL(hwnd);
         ImGui_ImplOpenGL3_Init();
+
+        ImFontConfig fontConfig;
+        fontConfig.FontDataOwnedByAtlas = false;
+        //ImFont* robotoFont = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoRegular, sizeof(g_RobotoRegular), 20.0f, &fontConfig);
+        ImFont* myriadPro = io.Fonts->AddFontFromFileTTF("../res/MyriadPro-Light.ttf", 20.0f);
+        //io.FontDefault = robotoFont;
+        io.FontDefault = myriadPro;
+        io.Fonts->Build();
 
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
         {
@@ -190,6 +200,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         while (!done)
         {
             std::vector<RECT> WindowRects;
+            std::vector<std::string> whitelist;
             while (::PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE))
             {
                 ::TranslateMessage(&msg);
@@ -214,7 +225,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             {
                 ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
             }
-
+            ImGui::PushFont(myriadPro);
             if (ImGui::BeginMainMenuBar())
             {
                 ImVec2 pos = ImGui::GetWindowPos();
@@ -341,7 +352,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 updated.size += 1;
             }
             g_ImGuiWindows.store(updated);
-            
+            ImGui::PopFont();
 
             
             // Rendering
