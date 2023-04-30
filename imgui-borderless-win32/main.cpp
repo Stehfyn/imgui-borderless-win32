@@ -192,8 +192,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     // Main loop
     bool done = false;
     static bool gradient = TRUE;
-    static int last_gradient_col = 0;
     static ImVec4 color = ImVec4(114.0f / 255.0f, 144.0f / 255.0f, 154.0f / 255.0f, 200.0f / 255.0f);
+    static int gradient_col = 0;
+    static int last_gradient_col = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
 
     MSG msg;
     while (!done)
@@ -212,43 +213,29 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
-
-        //update window rects
-        std::vector<RECT> WindowRects;
-        ImGuiViewport* vp = ImGui::GetMainViewport();
-        HWND handle = (HWND)vp->PlatformHandle;
-        RECT r;
-        GetWindowRect(handle, &r);
-        ImVec2 origin = { (float)r.left, (float)r.top };
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-        {
-            origin = { 0, 0 };
-        }
-
         {
             // Dockspace
             {
                 ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
             }
+
             // ImGui Demo
             {
                 ImGui::ShowDemoWindow(&show_demo_window);
             }
+
             // Borderless Demo
             {
                 ImGui::Begin("Borderless Demo");
                 ImGui::Checkbox("Use Gradient", &gradient);
-                static bool aero = TRUE;
+                static bool aero = FALSE;
                 ImGui::Checkbox("Toggle Aero", &aero);
 
-
                 ImGui::ColorPicker4("##picker", (float*)&color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
-                int gradient_col = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
-                //::MessageBoxA(nullptr, std::string(std::to_string(gradient_col)).c_str(), "Unhandled Exception", MB_OK | MB_ICONERROR);
+                gradient_col = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
                 std::string(std::to_string(gradient_col));
                 if (gradient_col != last_gradient_col)
                 {
-
                     ACCENT_POLICY policy = {
                     (aero) ? ACCENT_ENABLE_BLURBEHIND : ACCENT_ENABLE_TRANSPARENTGRADIENT,
                     (gradient) ? 2 : 0,
@@ -266,8 +253,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                     SetWindowCompositionAttribute(window.m_hHWND.get(), &data);
                 }
                 last_gradient_col = gradient_col;
+                
                 ImGui::End();
             }
+
             // Demo Overlay
             {
                 static float f = 0.0f;
@@ -285,26 +274,45 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 ImGui::End();
             }
         }
+
         // Rendering
         ImGui::Render();
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
+        // Update imgui window rects for hit testing
         {
-            if ((!(std::string(window->Name).find("Default") != std::string::npos) &&
-                (!(std::string(window->Name).find("Dock") != std::string::npos)) &&
-                (!(std::string(window->Name).find("Menu") != std::string::npos))) ||
-                (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
+            // Get ScreenPos offset
+            ImGuiViewport* vp = ImGui::GetMainViewport();
+            HWND handle = (HWND)vp->PlatformHandle;
+            RECT r;
+            GetWindowRect(handle, &r);
+
+            // Only apply offset if Multi-viewports are enabled
+            ImVec2 origin = { (float)r.left, (float)r.top };
+            if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
             {
-                ImVec2 pos = window->Pos;
-                ImVec2 size = window->Size;
-                RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
-                WindowRects.push_back(rect);
+                origin = { 0, 0 };
             }
+
+            // Add imgui windows that aren't default rects/dockspaces/etc to client area whitelist
+            std::vector<RECT> WindowRects;
+            for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
+            {
+                if ((!(std::string(window->Name).find("Default") != std::string::npos) &&
+                    (!(std::string(window->Name).find("Dock") != std::string::npos)) &&
+                    (!(std::string(window->Name).find("Menu") != std::string::npos))) ||
+                    (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
+                {
+                    ImVec2 pos = window->Pos;
+                    ImVec2 size = window->Size;
+                    RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
+                    WindowRects.push_back(rect);
+                }
+            }
+            window.set_client_area(WindowRects);
         }
-        window.set_client_area(WindowRects);
 
         // Update and Render additional Platform Windows
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -319,6 +327,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         // Present
         ::SwapBuffers(g_MainWindow.hDC);
     }
+
     return 0;
 
 #else

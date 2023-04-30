@@ -7,6 +7,7 @@
 
 #include <Windows.h>
 #include "imgui.h"
+
 #define USE_IMGUI
 
 struct hwnd_deleter {
@@ -29,13 +30,13 @@ public:
     VOID set_borderless_shadow(BOOL enabled);
     VOID set_client_area(std::vector<RECT>& client_rects);
     VOID set_client_area(std::vector<RECT>&& client_rects);
-    VOID set_imgui_wndprochandler(std::function<void()>&);
 
     UINT get_width() CONST;
     UINT get_height() CONST;
 
     unique_handle m_hHWND;
     LPWSTR m_wstrWC;
+
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
     LRESULT hit_test(POINT cursor);
