@@ -28,9 +28,12 @@ reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleH
 #include "stb_image.h"
 
 #include <atomic>
-#include <vector>
 #include <iostream>
+#include <utility>
+#include <unordered_map>
 #include <string>
+#include <vector>
+
 #include <stdexcept>
 #include <assert.h>
 #include <tchar.h>
@@ -53,6 +56,55 @@ bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data);
 void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data);
 //void ResetDeviceWGL();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// SmartProperty notifies on value change
+template <typename T>
+struct SmartProperty
+{
+public:
+    T m_Value; // The value to be changed/checked
+
+    SmartProperty(T value)
+        : m_Value(value),
+        m_LastValue(value),
+        m_Changed(FALSE)
+    {
+
+    }
+
+    BOOL update()
+    {
+        if (m_Value == m_LastValue) m_Changed = FALSE;
+        else m_Changed = TRUE;
+        m_LastValue = m_Value;
+        return m_Changed;
+    }
+
+    BOOL has_changed() const
+    {
+        return m_Changed;
+    }
+
+private:
+    T m_LastValue;
+    BOOL m_Changed;
+};
+
+int SliderIntPow2(const char* label, int* v, int v_min, int v_max)
+{
+    int pow2min = static_cast<int>(std::log2(v_min));
+    int pow2max = static_cast<int>(std::log2(v_max));
+
+    int pow2v = static_cast<int>(std::log2(*v));
+    if (pow2v < pow2min) pow2v = pow2min;
+    if (pow2v > pow2max) pow2v = pow2max;
+
+    if (ImGui::SliderInt(label, &pow2v, pow2min, pow2max)) {
+        *v = static_cast<int>(std::pow(2, pow2v));
+        return true;
+    }
+    return false;
+}
 
 static void Hook_Renderer_CreateWindow(ImGuiViewport* viewport)
 {
@@ -185,17 +237,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     }
     //ImGui::GetIO().ConfigViewportsNoDecoration = false;
 
-    bool show_demo_window = true;
-    bool show_another_window = false;
     ImVec4 clear_color = ImVec4(.0f, .0f, .0f, 0.f);
 
     // Main loop
     bool done = false;
-    static bool gradient = TRUE;
-    static ImVec4 color = ImVec4(114.0f / 255.0f, 144.0f / 255.0f, 154.0f / 255.0f, 200.0f / 255.0f);
-    static int gradient_col = 0;
-    static int last_gradient_col = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
-
+    
     MSG msg;
     while (!done)
     {
@@ -221,27 +267,70 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
             // ImGui Demo
             {
-                ImGui::ShowDemoWindow(&show_demo_window);
+                ImGui::ShowDemoWindow();
+            }
+
+            ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+            {
+                static bool show = true;
+                if (ImGui::Begin("Borderless Settings", 0, window_flags))
+                {
+                    static SmartProperty<INT> window_mode{ 1 };
+                    ImGui::RadioButton("Windowed", &window_mode.m_Value, 0);
+                    ImGui::RadioButton("Borderless", &window_mode.m_Value, 1);
+                    if (window_mode.update()) window.set_borderless(window_mode.m_Value);
+                }
+                ImGui::End();
             }
 
             // Borderless Demo
             {
-                ImGui::Begin("Borderless Demo");
-                ImGui::Checkbox("Use Gradient", &gradient);
-                static bool aero = FALSE;
-                ImGui::Checkbox("Toggle Aero", &aero);
+                ImGui::Begin("DWM Accent State", 0, window_flags);
+                static SmartProperty<INT> accent_policy { ACCENT_DISABLED };
+                ImGui::SeparatorText("DWM Accent State");
+                ImGui::RadioButton("DISABLED", &accent_policy.m_Value, ACCENT_DISABLED);
+                ImGui::RadioButton("GRADIENT", &accent_policy.m_Value, ACCENT_ENABLE_GRADIENT);
+                ImGui::RadioButton("TRANSPARENT GRADIENT", &accent_policy.m_Value, ACCENT_ENABLE_TRANSPARENTGRADIENT);
+                ImGui::RadioButton("BLUR BEHIND", &accent_policy.m_Value, ACCENT_ENABLE_BLURBEHIND);
+                ImGui::RadioButton("ACRYLIC BLUR BEHIND", &accent_policy.m_Value, ACCENT_ENABLE_ACRYLICBLURBEHIND);
+                ImGui::RadioButton("HOST BACKDROP", &accent_policy.m_Value, ACCENT_ENABLE_HOSTBACKDROP);
+                ImGui::RadioButton("INVALID STATE", &accent_policy.m_Value, ACCENT_INVALID_STATE);
+                ImGui::End();
 
+                ImGui::Begin("DWM Accent Flags", 0, window_flags);
+                ImGui::SeparatorText("DWM Accent Flags");
+                static SmartProperty<INT> accent_flags{ 1 };
+                //ImGui::SliderInt("Accent Flags", &accent_flags.m_Value, 0 , 32);
+                SliderIntPow2("Accent Flags", &accent_flags.m_Value, 1, 256);
+                ImGui::End();
+
+                ImGui::Begin("DWM Gradient", 0, window_flags);
+                ImGui::SeparatorText("DWM Gradient");
+                static ImVec4 color = ImVec4(114.0f / 255.0f, 144.0f / 255.0f, 154.0f / 255.0f, 200.0f / 255.0f);
+                static SmartProperty<INT> gradient_col = { (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255)) };
                 ImGui::ColorPicker4("##picker", (float*)&color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
-                gradient_col = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
-                std::string(std::to_string(gradient_col));
-                if (gradient_col != last_gradient_col)
+                gradient_col.m_Value = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
+                ImGui::End();
+
+                ImGui::Begin("DWM Animation id", 0, window_flags);
+                ImGui::SeparatorText("DWM Animation id");
+                static SmartProperty<INT> animation_id{ 0 };
+                ImGui::SliderInt("Accent Flags", &animation_id.m_Value, 0 , 32);
+                ImGui::End();
+
+                accent_policy.update();
+                accent_flags.update();
+                gradient_col.update();
+                animation_id.update();
+
+                if (accent_policy.has_changed() || accent_flags.has_changed() 
+                    || gradient_col.has_changed() || animation_id.has_changed())
                 {
                     ACCENT_POLICY policy = {
-                    (aero) ? ACCENT_ENABLE_BLURBEHIND : ACCENT_ENABLE_TRANSPARENTGRADIENT,
-                    (gradient) ? 2 : 0,
-                    gradient_col,
-                    //0xFF000000,
-                    0
+                    ACCENT_STATE(accent_policy.m_Value),
+                    accent_flags.m_Value,
+                    gradient_col.m_Value,
+                    animation_id.m_Value
                     };
 
                     const WINDOWCOMPOSITIONATTRIBDATA data = {
@@ -252,9 +341,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
                     SetWindowCompositionAttribute(window.m_hHWND.get(), &data);
                 }
-                last_gradient_col = gradient_col;
-                
-                ImGui::End();
             }
 
             // Demo Overlay
