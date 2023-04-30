@@ -141,6 +141,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="BorderlessWindow.hpp" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="imgui-borderless-win32.h" />
     <ClInclude Include="imgui\backends\imgui_impl_opengl2.h" />
@@ -159,6 +160,7 @@
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="BorderlessWindow.cpp" />
     <ClCompile Include="imgui\backends\imgui_impl_opengl2.cpp" />
     <ClCompile Include="imgui\backends\imgui_impl_opengl3.cpp" />
     <ClCompile Include="imgui\backends\imgui_impl_win32.cpp" />

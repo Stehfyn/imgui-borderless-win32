@@ -8,7 +8,6 @@
 #include "backends/imgui_impl_opengl3.h"
 #include "backends/imgui_impl_win32.h"
 
-
 #include <windows.h>
 #include <windowsx.h>
 #include <GL/gl.h>
@@ -21,7 +20,9 @@
 #pragma comment (lib, "dwmapi.lib")
 #pragma comment( lib, "msimg32.lib" )
 
-#include "swcadef.h" 
+#include "swcadef.h"
+static const auto SetWindowCompositionAttribute = 
+reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowCompositionAttribute"));
 #define STB_IMAGE_IMPLEMENTATION
 #define GL_CLAMP_TO_EDGE 0x812F
 #include "stb_image.h"
@@ -34,6 +35,9 @@
 #include <assert.h>
 #include <tchar.h>
 
+#define USE_IMGUI
+#include "BorderlessWindow.hpp"
+
 // Data stored per platform window
 struct WGL_WindowData { HDC hDC; };
 
@@ -44,21 +48,11 @@ static int              g_Width;
 static int              g_Height;
 static bool             g_Focused;
 
-struct ATOMIC_RECTVA
-{
-    unsigned int size = 0;
-    RECT rects[100];
-};
-
-static std::atomic<ATOMIC_RECTVA> g_ImGuiWindows;
-static std::atomic<ImVec2> g_Origin;
-
 // Forward declarations of helper functions
 bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data);
 void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data);
 //void ResetDeviceWGL();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 static void Hook_Renderer_CreateWindow(ImGuiViewport* viewport)
 {
@@ -126,374 +120,228 @@ bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_wid
 
     return true;
 }
+
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPWSTR    lpCmdLine,
     _In_ int       nCmdShow)
 {
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
 
-    unsigned int returncode = 0;
+#ifdef USE_IMGUI
+    //For Debug
+    AllocConsole();
+    freopen("CONIN$", "r", stdin);
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+    BorderlessWindow window;
 
-    try
+    if (!CreateDeviceWGL(window.m_hHWND.get(), &g_MainWindow))
     {
-        //For Debug
-        AllocConsole();
-        freopen("CONIN$", "r", stdin);
-        freopen("CONOUT$", "w", stdout);
-        freopen("CONOUT$", "w", stderr);
+        CleanupDeviceWGL(window.m_hHWND.get(), &g_MainWindow);
+        ::DestroyWindow(window.m_hHWND.get());
+        ::UnregisterClassW((LPCWSTR)window.m_wstrWC, GetModuleHandle(NULL));
+        return 1;
+    }
+    wglMakeCurrent(g_MainWindow.hDC, g_hRC);
 
-        //Create Window
-        WNDCLASSEXW wcx = { sizeof(wcx), CS_OWNDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, L"ImGui Example", NULL };
-        ::RegisterClassExW(&wcx);
-        HWND hwnd = ::CreateWindowExW(0, wcx.lpszClassName, L"Dear ImGui Win32+OpenGL3 Example", WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, 100, 100, 1280, 800, NULL, NULL, wcx.hInstance, NULL);
+    ::ShowWindow(window.m_hHWND.get(), SW_SHOWDEFAULT);
+    ::UpdateWindow(window.m_hHWND.get());
 
-        static const MARGINS shadow_state[2]{ { 0,0,0,0 },{ 1,1,1,1 } };
-        static const MARGINS chonk = { 0,0,0,1 };
-        //::DwmExtendFrameIntoClientArea(hwnd, &shadow_state[true]);
-        ::DwmExtendFrameIntoClientArea(hwnd, &chonk);
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;   // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;    // Enable Gamepad Controls
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;       // Enable Docking
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;     // Enable Multi-Viewport / Platform Windows
 
-        static const auto SetWindowCompositionAttribute =
-            reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowCompositionAttribute"));
+    // Setup Dear ImGui style
+    ImGui::StyleColorsDark();
+    //ImGui::StyleColorsClassic();
 
-        DWM_BLURBEHIND bb = { 0 };
-        HRGN hRgn = CreateRectRgn(0, 0, -1, -1);
-        bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
-        bb.hRgnBlur = hRgn;
-        bb.fEnable = TRUE;
-        DwmEnableBlurBehindWindow(hwnd, &bb);
-        if (!CreateDeviceWGL(hwnd, &g_MainWindow))
+    ImGuiStyle& style = ImGui::GetStyle();
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+    {
+        style.WindowRounding = 0.0f;
+        style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+    }
+
+    // Setup Platform/Renderer backends
+    ImGui_ImplWin32_InitForOpenGL(window.m_hHWND.get());
+    ImGui_ImplOpenGL3_Init();
+
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+    {
+        ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+        IM_ASSERT(platform_io.Renderer_CreateWindow == NULL);
+        IM_ASSERT(platform_io.Renderer_DestroyWindow == NULL);
+        IM_ASSERT(platform_io.Renderer_SwapBuffers == NULL);
+        IM_ASSERT(platform_io.Platform_RenderWindow == NULL);
+        platform_io.Renderer_CreateWindow = Hook_Renderer_CreateWindow;
+        platform_io.Renderer_DestroyWindow = Hook_Renderer_DestroyWindow;
+        platform_io.Renderer_SwapBuffers = Hook_Renderer_SwapBuffers;
+        platform_io.Platform_RenderWindow = Hook_Platform_RenderWindow;
+    }
+    //ImGui::GetIO().ConfigViewportsNoDecoration = false;
+
+    bool show_demo_window = true;
+    bool show_another_window = false;
+    ImVec4 clear_color = ImVec4(.0f, .0f, .0f, 0.f);
+
+    // Main loop
+    bool done = false;
+    static bool gradient = TRUE;
+    static int last_gradient_col = 0;
+    static ImVec4 color = ImVec4(114.0f / 255.0f, 144.0f / 255.0f, 154.0f / 255.0f, 200.0f / 255.0f);
+
+    MSG msg;
+    while (!done)
+    {
+
+        while (::PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE))
         {
-            CleanupDeviceWGL(hwnd, &g_MainWindow);
-            ::DestroyWindow(hwnd);
-            ::UnregisterClassW(wcx.lpszClassName, wcx.hInstance);
-            return 1;
+            ::TranslateMessage(&msg);
+            ::DispatchMessage(&msg);
+            if (msg.message == WM_QUIT)
+                done = true;
         }
-        wglMakeCurrent(g_MainWindow.hDC, g_hRC);
+        if (done)
+            break;
 
-        ::ShowWindow(hwnd, SW_SHOWDEFAULT);
-        ::UpdateWindow(hwnd);
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
 
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGuiIO& io = ImGui::GetIO(); (void)io;
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;   // Enable Keyboard Controls
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;    // Enable Gamepad Controls
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;       // Enable Docking
-        //io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;     // Enable Multi-Viewport / Platform Windows
-
-        
-
-        // Setup Dear ImGui style
-        ImGui::StyleColorsDark();
-        //ImGui::StyleColorsClassic();
-
-        // When viewports are enabled we tweak WindowRounding/WindowBg so platform windows can look identical to regular ones.
-        ImGuiStyle& style = ImGui::GetStyle();
+        //update window rects
+        std::vector<RECT> WindowRects;
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        HWND handle = (HWND)vp->PlatformHandle;
+        RECT r;
+        GetWindowRect(handle, &r);
+        ImVec2 origin = { (float)r.left, (float)r.top };
         if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
         {
-            style.WindowRounding = 0.0f;
-            style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+            origin = { 0, 0 };
         }
 
-        // Setup Platform/Renderer backends
-        ImGui_ImplWin32_InitForOpenGL(hwnd);
-        ImGui_ImplOpenGL3_Init();
-
-        ImFontConfig fontConfig;
-        fontConfig.FontDataOwnedByAtlas = false;
-        //ImFont* robotoFont = io.Fonts->AddFontFromMemoryTTF((void*)g_RobotoRegular, sizeof(g_RobotoRegular), 20.0f, &fontConfig);
-        ImFont* myriadPro = io.Fonts->AddFontFromFileTTF("../res/MyriadPro-Light.ttf", 16.0f);
-        //io.FontDefault = robotoFont;
-        io.FontDefault = myriadPro;
-        io.Fonts->Build();
-
-        int my_image_width = 0;
-        int my_image_height = 0;
-        GLuint my_image_texture = 0;
-        bool ret = LoadTextureFromFile("../res/unr-active.png", &my_image_texture, &my_image_width, &my_image_height);
-        IM_ASSERT(ret);
-
-        int my_inactive_width = 0;
-        int my_inactive_height = 0;
-        GLuint my_inactive_texture = 0;
-        ret = LoadTextureFromFile("../res/unr-inactive.png", &my_inactive_texture, &my_inactive_width, &my_inactive_height);
-        IM_ASSERT(ret);
-
-        int my_close_width = 0;
-        int my_close_height = 0;
-        GLuint my_close_texture = 0;
-        ret = LoadTextureFromFile("../res/close.png", &my_close_texture, &my_close_width, &my_close_height);
-        IM_ASSERT(ret);
-
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
         {
-            ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
-            IM_ASSERT(platform_io.Renderer_CreateWindow == NULL);
-            IM_ASSERT(platform_io.Renderer_DestroyWindow == NULL);
-            IM_ASSERT(platform_io.Renderer_SwapBuffers == NULL);
-            IM_ASSERT(platform_io.Platform_RenderWindow == NULL);
-            platform_io.Renderer_CreateWindow = Hook_Renderer_CreateWindow;
-            platform_io.Renderer_DestroyWindow = Hook_Renderer_DestroyWindow;
-            platform_io.Renderer_SwapBuffers = Hook_Renderer_SwapBuffers;
-            platform_io.Platform_RenderWindow = Hook_Platform_RenderWindow;
-        }
-
-        ImGui::GetIO().ConfigViewportsNoDecoration = false;
-        // Our state
-        bool show_demo_window = true;
-        bool show_another_window = false;
-        ImVec4 clear_color = ImVec4(.0f, .0f, .0f, 0.f);
-
-        // Main loop
-        bool done = false;
-        static bool gradient = TRUE;
-        static int last_gradient_col = 0;
-        static ImVec4 color = ImVec4(114.0f / 255.0f, 144.0f / 255.0f, 154.0f / 255.0f, 200.0f / 255.0f);
-
-        MSG msg;
-        while (!done)
-        {
-            std::vector<RECT> WindowRects;
-            std::vector<std::string> whitelist;
-            while (::PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE))
-            {
-                ::TranslateMessage(&msg);
-                ::DispatchMessage(&msg);
-                if (msg.message == WM_QUIT)
-                    done = true;
-            }
-            if (done)
-                break;
-
-            // Start the Dear ImGui frame
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplWin32_NewFrame();
-            ImGui::NewFrame();
-            //update window rects
-            ImGuiViewport* vp = ImGui::GetMainViewport();
-            HWND handle = (HWND)vp->PlatformHandle;
-            RECT r;
-            GetWindowRect(handle, &r);
-            ImVec2 origin = { (float)r.left, (float)r.top };
-
-            g_Origin.store(origin);
+            // Dockspace
             {
                 ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
             }
-            ImGui::PushFont(myriadPro);
-            if (ImGui::BeginMainMenuBar())
+            // ImGui Demo
             {
-                ImVec2 pos = ImGui::GetWindowPos();
-                ImVec2 size = ImGui::GetWindowSize();
-                RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
-                WindowRects.push_back(rect);
-
-                float offset = ImGui::GetFrameHeight() * .25f/2.0f;
-                ImVec2 start = ImGui::GetCursorScreenPos();
-                start.y += offset;
-                ImVec2 end = { ((start.x + ImGui::GetFrameHeight()) * .75f) + offset/2.0f, ((start.y + ImGui::GetFrameHeight()) * .75f) + offset/2.0f};
-                
-                if (g_Focused) ImGui::GetWindowDrawList()->AddImage((void*)(intptr_t)my_image_texture, start, end);
-                else ImGui::GetWindowDrawList()->AddImage((void*)(intptr_t)my_inactive_texture, start, end);
-
-                ImGui::Dummy({(float)end.x - start.x, 0});
-                if (ImGui::BeginMenu("File"))
-                {
-                    if (ImGui::MenuItem("New"))
-                    {
-                    }
-                    ImGui::EndMenu();
-                }
-                if (ImGui::BeginMenu("Edit"))
-                {
-                    ImGui::EndMenu();
-                }
-                if (ImGui::BeginMenu("Settings"))
-                {
-                    ImGui::EndMenu();
-                }
-                if (ImGui::BeginMenu("Help"))
-                {
-                    ImGui::EndMenu();
-                }
-                ImGui::SetCursorPos({ ImGui::GetWindowWidth() - ImGui::GetFrameHeight() - ImGui::GetStyle().FramePadding.x, ImGui::GetCursorPos().y});
-                if (ImGui::ImageButton((void*)(intptr_t)my_close_texture, {ImGui::GetFrameHeight() - ImGui::GetStyle().FramePadding.x, ImGui::GetFrameHeight() - ImGui::GetStyle().FramePadding.x}))
-                {
-                    PostMessage(hwnd, WM_QUIT, 0, 0);
-                }
-            }
-            ImGui::EndMainMenuBar();
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.1f, 1.0f));
-            ImGui::SetNextWindowBgAlpha(254.0f);
-            ImGuiWindowClass iwc;
-            //iwc.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoRendererClear;
-            ImGui::SetNextWindowClass(&iwc);
-            // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
-            if (show_demo_window)
-            { 
                 ImGui::ShowDemoWindow(&show_demo_window);
             }
+            // Borderless Demo
+            {
+                ImGui::Begin("Borderless Demo");
+                ImGui::Checkbox("Use Gradient", &gradient);
+                static bool aero = TRUE;
+                ImGui::Checkbox("Toggle Aero", &aero);
 
-            ImGui::PopStyleColor();
-            // 2. Show a simple window that we create ourselves. We use a Begin/End pair to create a named window.
+
+                ImGui::ColorPicker4("##picker", (float*)&color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
+                int gradient_col = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
+                //::MessageBoxA(nullptr, std::string(std::to_string(gradient_col)).c_str(), "Unhandled Exception", MB_OK | MB_ICONERROR);
+                std::string(std::to_string(gradient_col));
+                if (gradient_col != last_gradient_col)
+                {
+
+                    ACCENT_POLICY policy = {
+                    (aero) ? ACCENT_ENABLE_BLURBEHIND : ACCENT_ENABLE_TRANSPARENTGRADIENT,
+                    (gradient) ? 2 : 0,
+                    gradient_col,
+                    //0xFF000000,
+                    0
+                    };
+
+                    const WINDOWCOMPOSITIONATTRIBDATA data = {
+                        WCA_ACCENT_POLICY,
+                        &policy,
+                        sizeof(policy)
+                    };
+
+                    SetWindowCompositionAttribute(window.m_hHWND.get(), &data);
+                }
+                last_gradient_col = gradient_col;
+                ImGui::End();
+            }
+            // Demo Overlay
             {
                 static float f = 0.0f;
                 static int counter = 0;
-
-                ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
-                ImVec2 pos = ImGui::GetWindowPos();
-                ImVec2 size = ImGui::GetWindowSize();
-                RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
-                WindowRects.push_back(rect);
-
-                ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-                ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-                ImGui::Checkbox("Another Window", &show_another_window);
-
-                ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-                ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
-
-                if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-                    counter++;
-                ImGui::SameLine();
-                ImGui::Text("counter = %d", counter);
-
-                ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
-                ImGui::End();
-            }
-
-            // 3. Show another simple window.
-            if (show_another_window)
-            {
-                ImGui::Begin("Another Window", &show_another_window);   // Pass a pointer to our bool variable (the window will have a closing button that will clear the bool when clicked)
-                ImGui::Text("Hello from another window!");
-                if (ImGui::Button("Close Me"))
-                    show_another_window = false;
-                ImVec2 pos = ImGui::GetWindowPos();
-                ImVec2 size = ImGui::GetWindowSize();
-                RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
-                WindowRects.push_back(rect);
-
+                ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+                static bool show = true;
+                if (ImGui::Begin("Example: Simple overlay", &show, window_flags))
                 {
-
-
-                    ImGui::Checkbox("Use Gradient", &gradient);
-                    static bool aero = TRUE;
-                    ImGui::Checkbox("Toggle Aero", &aero);
-
-
-                    ImGui::ColorPicker4("##picker", (float*)&color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
-                    int gradient_col = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
-                    //::MessageBoxA(nullptr, std::string(std::to_string(gradient_col)).c_str(), "Unhandled Exception", MB_OK | MB_ICONERROR);
-                    std::string(std::to_string(gradient_col));
-                    if (gradient_col != last_gradient_col)
-                    {
-
-                        ACCENT_POLICY policy = {
-                        (aero) ? ACCENT_ENABLE_BLURBEHIND : ACCENT_ENABLE_TRANSPARENTGRADIENT,
-                        (gradient) ? 2 : 0,
-                        gradient_col,
-                        //0xFF000000,
-                        0
-                        };
-
-                        const WINDOWCOMPOSITIONATTRIBDATA data = {
-                            WCA_ACCENT_POLICY,
-                            &policy,
-                            sizeof(policy)
-                        };
-
-                        SetWindowCompositionAttribute(hwnd, &data);
-                    }
-                    last_gradient_col = gradient_col;
-
-
+                    if (ImGui::IsMousePosValid())
+                        ImGui::Text("Mouse Position: (%.1f,%.1f)", io.MousePos.x, io.MousePos.y);
+                    else
+                        ImGui::Text("Mouse Position: <invalid>");
+                    ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
                 }
                 ImGui::End();
             }
-            // update window rects
-            std::cout <<  "=========" << std::endl;
-            for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
+        }
+        // Rendering
+        ImGui::Render();
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
+        {
+            if ((!(std::string(window->Name).find("Default") != std::string::npos) &&
+                (!(std::string(window->Name).find("Dock") != std::string::npos)) &&
+                (!(std::string(window->Name).find("Menu") != std::string::npos))) ||
+                (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
             {
-                std::cout << window->Name << std::endl;
-
-
-                if ((!(std::string(window->Name).find("Default") != std::string::npos) &&
-                    (!(std::string(window->Name).find("Dock") != std::string::npos))) ||
-                    (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
-                {
-                    ImVec2 pos = window->Pos;
-                    ImVec2 size = window->Size;
-                    RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
-                    WindowRects.push_back(rect);
-                }
+                ImVec2 pos = window->Pos;
+                ImVec2 size = window->Size;
+                RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
+                WindowRects.push_back(rect);
             }
-            std::cout << "=========" << std::endl;
-            ATOMIC_RECTVA updated;
-            for (RECT rect : WindowRects)
-            {
-                updated.rects[updated.size] = rect;
-                updated.size += 1;
-            }
-            g_ImGuiWindows.store(updated);
-            ImGui::PopFont();
+        }
+        window.set_client_area(WindowRects);
 
-            
-            // Rendering
-            ImGui::Render();
-            glViewport(0, 0, g_Width, g_Height);
-            glEnable(GL_ALPHA_TEST);
-            glEnable(GL_DEPTH_TEST);
-            glEnable(GL_COLOR_MATERIAL);
+        // Update and Render additional Platform Windows
+        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        {
+            ImGui::UpdatePlatformWindows();
+            ImGui::RenderPlatformWindowsDefault();
 
-            glEnable(GL_LIGHTING);
-            glEnable(GL_LIGHT0);
+            // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
+            wglMakeCurrent(g_MainWindow.hDC, g_hRC);
+        }
 
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glClearColor(0, 0, 0, 0);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        // Present
+        ::SwapBuffers(g_MainWindow.hDC);
+    }
+    return 0;
 
-            // Update and Render additional Platform Windows
-            if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-            {
-                ImGui::UpdatePlatformWindows();
-                ImGui::RenderPlatformWindowsDefault();
+#else
+    try {
+        BorderlessWindow window;
+        std::vector<RECT> rects = { {0, 0, 100, 100}, {1820, 0, 1920, 100} };
+        //window.set_client_area(rects);
 
-                // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
-                wglMakeCurrent(g_MainWindow.hDC, g_hRC);
-            }
-
-            // Present
-            ::SwapBuffers(g_MainWindow.hDC);
-
+        MSG msg;
+        while (::GetMessageW(&msg, nullptr, 0, 0) == TRUE) {
+            ::TranslateMessage(&msg);
+            ::DispatchMessageW(&msg);
         }
     }
-
-    catch (const std::exception& e)
-    {
+    catch (const std::exception& e) {
         ::MessageBoxA(nullptr, e.what(), "Unhandled Exception", MB_OK | MB_ICONERROR);
-        std::cout << e.what() << std::endl;
-        Sleep(10000);
-        returncode = 1;
-    }
-
-    return returncode;
 }
+#endif
+} // main
+
 bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data)
 {
     HDC hDc = ::GetDC(hWnd);
-    //PIXELFORMATDESCRIPTOR pfd = { 0 };
-    //pfd.nSize = sizeof(pfd);
-    //pfd.nVersion = 1;
-    //pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_SUPPORT_COMPOSITION;
-    //pfd.iPixelType = PFD_TYPE_RGBA;
-    //pfd.cColorBits = 32;
-    ////===
-    //pfd.cAlphaBits = 8;
     PIXELFORMATDESCRIPTOR pfd = {
       sizeof(PIXELFORMATDESCRIPTOR),
       1,                                // Version Number
@@ -533,121 +381,4 @@ void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data)
 {
     wglMakeCurrent(NULL, NULL);
     ::ReleaseDC(hWnd, data->hDC);
-}
-
-LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
-        return true;
-
-    switch (msg)
-    {
-    case WM_CREATE:
-    {
-        RECT rcClient;
-        GetWindowRect(hWnd, &rcClient);
-
-        // Inform the application of the frame change.
-        SetWindowPos(hWnd,
-            NULL,
-            rcClient.left, rcClient.top,
-            rcClient.right - rcClient.left, rcClient.bottom - rcClient.top,
-            SWP_FRAMECHANGED);
-        return 0;
-    }
-    case WM_SETFOCUS:
-        g_Focused = true;
-        break;
-
-    case WM_KILLFOCUS:
-        g_Focused = false;
-        break;
-    case WM_NCCALCSIZE: {
-        if (wParam == TRUE && true) {
-            auto& params = *reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
-            //adjust_maximized_client_rect(hwnd, params.rgrc[0]);
-            return 0;
-        }
-        break;
-    }
-    case WM_NCHITTEST: {
-        // When we have no border or title bar, we need to perform our
-        // own hit testing to allow resizing and moving.
-        if (true)
-        {
-            bool borderless_drag = true;
-            bool borderless_resize = true;
-            POINT cursor = POINT{
-                GET_X_LPARAM(lParam),
-                GET_Y_LPARAM(lParam) };
-
-            const POINT border{
-                ::GetSystemMetrics(SM_CXFRAME) + ::GetSystemMetrics(SM_CXPADDEDBORDER),
-                ::GetSystemMetrics(SM_CYFRAME) + ::GetSystemMetrics(SM_CXPADDEDBORDER)
-            };
-            RECT window;
-            if (!::GetWindowRect(hWnd, &window)) {
-                return HTNOWHERE;
-            }
-
-            const auto drag = borderless_drag ? HTCAPTION : HTCLIENT;
-
-            enum region_mask {
-                client = 0b0000,
-                left = 0b0001,
-                right = 0b0010,
-                top = 0b0100,
-                bottom = 0b1000,
-            };
-            ImVec2 origin = ImVec2(g_Origin);
-
-            ATOMIC_RECTVA atomic_rects = ATOMIC_RECTVA(g_ImGuiWindows);
-            for (unsigned int i = 0; i < atomic_rects.size; ++i)
-            {
-                RECT r = atomic_rects.rects[i];
-                if (PtInRect(&r, cursor))
-                {
-                    return HTCLIENT;
-                }
-            }
-
-            const auto result =
-                left * (cursor.x < (window.left + border.x)) |
-                right * (cursor.x >= (window.right - border.x)) |
-                top * (cursor.y < (window.top + border.y)) |
-                bottom * (cursor.y >= (window.bottom - border.y));
-
-            switch (result) {
-            case left: return borderless_resize ? HTLEFT : drag;
-            case right: return borderless_resize ? HTRIGHT : drag;
-            case top: return borderless_resize ? HTTOP : drag;
-            case bottom: return borderless_resize ? HTBOTTOM : drag;
-            case top | left: return borderless_resize ? HTTOPLEFT : drag;
-            case top | right: return borderless_resize ? HTTOPRIGHT : drag;
-            case bottom | left: return borderless_resize ? HTBOTTOMLEFT : drag;
-            case bottom | right: return borderless_resize ? HTBOTTOMRIGHT : drag;
-            case client: return drag;
-            default: return HTNOWHERE;
-            }
-        }
-        break;
-    }
-    case WM_SIZE:
-        if (wParam != SIZE_MINIMIZED)
-        {
-            g_Width = LOWORD(lParam);
-            g_Height = HIWORD(lParam);
-        }
-        return 0;
-    case WM_SYSCOMMAND:
-        if ((wParam & 0xfff0) == SC_KEYMENU) // Disable ALT application menu
-            return 0;
-        if ((wParam & 0xF012))
-            std::cout << "DRAG MOVE\n";
-        break;
-    case WM_DESTROY:
-        ::PostQuitMessage(0);
-        return 0;
-    }
-    return ::DefWindowProc(hWnd, msg, wParam, lParam);
 }
