@@ -2,6 +2,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #define _CRT_SECURE_NO_WARNINGS
+#define _ALLOW_KEYWORD_MACROS
+#define inline __inline
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -33,13 +35,27 @@ reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleH
 #include <unordered_map>
 #include <string>
 #include <vector>
-
+#include <mutex>
+#include <thread>
+#include <cassert>
 #include <stdexcept>
 #include <assert.h>
 #include <tchar.h>
 
 #define USE_IMGUI
 #include "BorderlessWindow.hpp"
+#include "video_reader.hpp"
+#define posix_memalign(p, a, s) (((*(p)) = _aligned_malloc((s), (a))), *(p) ?0 :errno)
+#pragma comment(lib, "strmiids.lib")
+#pragma comment(lib, "runtimeobject.lib")
+#pragma comment( lib, "msimg32.lib" )
+#pragma comment(lib, "Ws2_32.lib")
+#pragma comment(lib, "mfuuid.lib")
+#pragma comment (lib, "libavformat.a")
+#pragma comment (lib, "libavcodec.a")
+#pragma comment (lib, "libavutil.a")
+#pragma comment( lib, "libswscale.a" )
+#pragma comment( lib, "libswresample.a" )
 
 // Data stored per platform window
 struct WGL_WindowData { HDC hDC; };
@@ -74,10 +90,20 @@ public:
 
     BOOL update()
     {
-        if (m_Value == m_LastValue) m_Changed = FALSE;
-        else m_Changed = TRUE;
-        m_LastValue = m_Value;
-        return m_Changed;
+        if (!m_EpsilonEnabled)
+        {
+            if (m_Value == m_LastValue) m_Changed = FALSE;
+            else m_Changed = TRUE;
+            m_LastValue = m_Value;
+            return m_Changed;
+        }
+        else
+        {
+            if ((m_Value <= m_LastValue + m_Epsilon) && (m_Value >= m_LastValue - m_Epsilon)) m_Changed = FALSE;
+            else m_Changed = TRUE;
+            m_LastValue = m_Value;
+            return m_Changed;
+        }
     }
 
     BOOL has_changed() const
@@ -85,9 +111,18 @@ public:
         return m_Changed;
     }
 
+    VOID enable_epsilon(T epsilon)
+    {
+        m_EpsilonEnabled = TRUE;
+        m_Epsilon = epsilon;
+    }
+
 private:
     T m_LastValue;
+    T m_Epsilon;
+    BOOL m_EpsilonEnabled{};
     BOOL m_Changed;
+
 };
 
 int SliderIntPow2(const char* label, int* v, int v_min, int v_max)
@@ -173,7 +208,6 @@ bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_wid
     return true;
 }
 
-
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPWSTR    lpCmdLine,
@@ -183,11 +217,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 #ifdef USE_IMGUI
     //For Debug
     AllocConsole();
+
     freopen("CONIN$", "r", stdin);
     freopen("CONOUT$", "w", stdout);
     freopen("CONOUT$", "w", stderr);
-    BorderlessWindow window;
 
+    BorderlessWindow window;
+    
     if (!CreateDeviceWGL(window.m_hHWND.get(), &g_MainWindow))
     {
         CleanupDeviceWGL(window.m_hHWND.get(), &g_MainWindow);
@@ -195,6 +231,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         ::UnregisterClassW((LPCWSTR)window.m_wstrWC, GetModuleHandle(NULL));
         return 1;
     }
+
     wglMakeCurrent(g_MainWindow.hDC, g_hRC);
 
     ::ShowWindow(window.m_hHWND.get(), SW_SHOWDEFAULT);
@@ -237,12 +274,37 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     }
     //ImGui::GetIO().ConfigViewportsNoDecoration = false;
 
-    ImVec4 clear_color = ImVec4(.0f, .0f, .0f, 0.f);
+    VideoReaderState vr_state;
+    vr_state.sws_scaler_ctx = NULL;
+    if (!video_reader_open(&vr_state, "..\\res\\WarthogVignette.mp4")) {
+        printf("Couldn't open video file (make sure you set a video file that exists)\n");
+        return 1;
+    }
+    
+    GLuint tex_handle;
+    glGenTextures(1, &tex_handle);
+    glBindTexture(GL_TEXTURE_2D, tex_handle);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+
+    constexpr int ALIGNMENT = 128;
+    const int frame_width = vr_state.width;
+    const int frame_height = vr_state.height;
+    uint8_t* frame_data;
+
+    if (posix_memalign((void**)&frame_data, ALIGNMENT, frame_width * frame_height * 4) != 0) {
+        printf("Couldn't allocate frame buffer\n");
+        return 1;
+    }
 
     // Main loop
     bool done = false;
-    
     MSG msg;
+    ImVec4 clear_color = ImVec4(.0f, .0f, .0f, 0.f);
     while (!done)
     {
 
@@ -259,6 +321,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        GLuint image_texture;
         {
             // Dockspace
             {
@@ -359,6 +422,42 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 }
                 ImGui::End();
             }
+
+            static float last_frame_time = 0.0f;
+            last_frame_time += ImGui::GetIO().DeltaTime;
+            window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+            ImGui::Begin("Enable .bk2", 0, window_flags);
+            static bool show = true;
+            ImGui::Checkbox("Enable .bk2", &show);
+            ImGui::End();
+
+            static float time = 0.0f;
+            static SmartProperty<double> endFlag {-100};
+            endFlag.enable_epsilon(0.0001);
+            if(show)
+            {
+                RECT wRect{};
+                GetWindowRect(window.m_hHWND.get(), &wRect);
+                ImVec2 start{ (float)wRect.left, (float)wRect.top };
+                ImVec2 end{ (float)wRect.right, (float)wRect.bottom };
+                if (time > 0.0333f)
+                {
+                    int64_t pts;
+                    if (!video_reader_read_frame(&vr_state, frame_data, &pts)) {
+                        printf("Couldn't load video frame\n");
+                        return 1;
+                    }
+                    printf("%lf\n", pts * (double)vr_state.time_base.num / (double)vr_state.time_base.den);
+                    endFlag.m_Value = pts * (double)vr_state.time_base.num / (double)vr_state.time_base.den;
+                    if (!endFlag.update()) video_reader_seek_frame(&vr_state, 0.00f);
+
+                    glBindTexture(GL_TEXTURE_2D, tex_handle);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, frame_width, frame_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, frame_data);
+                    time = 0.00f;
+                }
+                ImGui::GetBackgroundDrawList()->AddImage((void*)(intptr_t)tex_handle, start, end);
+            }
+            time += ImGui::GetIO().DeltaTime;
         }
 
         // Rendering
@@ -366,7 +465,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
+        glDeleteTextures(1, &image_texture);
         // Update imgui window rects for hit testing
         {
             // Get ScreenPos offset
@@ -440,8 +539,8 @@ bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data)
     PIXELFORMATDESCRIPTOR pfd = {
       sizeof(PIXELFORMATDESCRIPTOR),
       1,                                // Version Number
-      PFD_DRAW_TO_WINDOW |         // Format Must Support Window
-      PFD_SUPPORT_OPENGL |         // Format Must Support OpenGL
+      PFD_DRAW_TO_WINDOW |              // Format Must Support Window
+      PFD_SUPPORT_OPENGL |              // Format Must Support OpenGL
       PFD_SUPPORT_COMPOSITION |         // Format Must Support Composition
       PFD_DOUBLEBUFFER,                 // Must Support Double Buffering
       PFD_TYPE_RGBA,                    // Request An RGBA Format

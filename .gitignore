@@ -7,3 +7,6 @@ Release/
 
 # 64-bit Build Binaries
 x64/
+
+# ffmpeg Headers and Static Binaries
+**/ffmpeg
