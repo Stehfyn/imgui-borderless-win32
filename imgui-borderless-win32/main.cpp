@@ -23,8 +23,6 @@ reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleH
 #include <string>
 #include <vector>
 
-#define BORDERLESS_USE_IMGUI // Tell BorderlessWindow to call ImGui_ImplWin32_WndProcHandler in WndProc
-#define BORDERLESS_DEBUG     // Alloc a console to our Windows subsytem process
 #include "BorderlessWindow.hpp"
 
 // Data stored per platform window

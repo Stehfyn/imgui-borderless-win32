@@ -9,6 +9,9 @@
 #include <Windows.h>
 #include "imgui.h"
 
+#define BORDERLESS_DEBUG     // Alloc a console to our Windows subsytem process
+#define BORDERLESS_USE_IMGUI // Tell BorderlessWindow to call ImGui_ImplWin32_WndProcHandler in WndProc
+
 struct hwnd_deleter {
     using pointer = HWND;
     auto operator()(HWND handle) const -> void {
