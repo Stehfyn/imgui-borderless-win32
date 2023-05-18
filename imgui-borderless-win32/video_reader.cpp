@@ -1,5 +1,5 @@
 #include "video_reader.hpp"
-
+#include <cstdlib>
 // av_err2str returns a temporary array. This doesn't work in gcc.
 // This function can be used as a replacement for av_err2str.
 static const char* av_make_error(int errnum) {
@@ -30,6 +30,7 @@ bool video_reader_open(VideoReaderState* state, const char* filename) {
     auto& av_codec_ctx = state->av_codec_ctx;
     auto& video_stream_index = state->video_stream_index;
     auto& av_frame = state->av_frame;
+    auto& av_frameOut = state->av_frameOut;
     auto& av_packet = state->av_packet;
 
     // Open the file using libavformat
@@ -87,6 +88,11 @@ bool video_reader_open(VideoReaderState* state, const char* filename) {
         printf("Couldn't allocate AVFrame\n");
         return false;
     }
+    av_frameOut = av_frame_alloc();
+    if (!av_frameOut) {
+        printf("Couldn't allocate AVFrame\n");
+        return false;
+    }
     av_packet = av_packet_alloc();
     if (!av_packet) {
         printf("Couldn't allocate AVPacket\n");
@@ -96,7 +102,7 @@ bool video_reader_open(VideoReaderState* state, const char* filename) {
     return true;
 }
 
-bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int64_t* pts) {
+bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int64_t* pts, uint8_t alpha) {
 
     // Unpack members of state
     auto& width = state->width;
@@ -106,6 +112,7 @@ bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int
     auto& video_stream_index = state->video_stream_index;
     auto& av_frame = state->av_frame;
     auto& av_packet = state->av_packet;
+    auto& av_frameOut = state->av_frameOut;
     auto& sws_scaler_ctx = state->sws_scaler_ctx;
 
     // Decode one frame
@@ -136,12 +143,12 @@ bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int
     }
 
     *pts = av_frame->pts;
-    
+
     // Set up sws scaler
     if (!sws_scaler_ctx) {
         auto source_pix_fmt = correct_for_deprecated_pixel_format(av_codec_ctx->pix_fmt);
         sws_scaler_ctx = sws_getContext(width, height, source_pix_fmt,
-                                        width, height, AV_PIX_FMT_RGB0,
+                                        width, height, AV_PIX_FMT_RGBA,
                                         SWS_BILINEAR, NULL, NULL, NULL);
     }
     if (!sws_scaler_ctx) {
@@ -152,6 +159,12 @@ bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int
     uint8_t* dest[4] = { frame_buffer, NULL, NULL, NULL };
     int dest_linesize[4] = { width * 4, 0, 0, 0 };
     sws_scale(sws_scaler_ctx, av_frame->data, av_frame->linesize, 0, av_frame->height, dest, dest_linesize);
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int index = y * dest_linesize[0] + x * 4 + 3; // index of alpha channel for current pixel
+            dest[0][index] = alpha; // set alpha value to 150
+        }
+    }
 
     return true;
 }
@@ -164,6 +177,7 @@ bool video_reader_seek_frame(VideoReaderState* state, int64_t ts) {
     auto& video_stream_index = state->video_stream_index;
     auto& av_packet = state->av_packet;
     auto& av_frame = state->av_frame;
+    auto& av_frameOut = state->av_frameOut;
     
     av_seek_frame(av_format_ctx, video_stream_index, ts, AVSEEK_FLAG_BACKWARD);
 

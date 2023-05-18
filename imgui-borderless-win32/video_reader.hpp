@@ -5,6 +5,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include <libavutil/imgutils.h>
 #include <inttypes.h>
 }
 
@@ -18,12 +19,13 @@ struct VideoReaderState {
     AVCodecContext* av_codec_ctx;
     int video_stream_index;
     AVFrame* av_frame;
+    AVFrame* av_frameOut;
     AVPacket* av_packet;
     SwsContext* sws_scaler_ctx;
 };
 
 bool video_reader_open(VideoReaderState* state, const char* filename);
-bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int64_t* pts);
+bool video_reader_read_frame(VideoReaderState* state, uint8_t* frame_buffer, int64_t* pts, uint8_t alpha);
 bool video_reader_seek_frame(VideoReaderState* state, int64_t ts);
 void video_reader_close(VideoReaderState* state);
 

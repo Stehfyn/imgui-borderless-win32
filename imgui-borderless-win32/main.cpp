@@ -41,10 +41,12 @@ reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleH
 #include <stdexcept>
 #include <assert.h>
 #include <tchar.h>
+#include <filesystem>
 
 #define USE_IMGUI
 #include "BorderlessWindow.hpp"
 #include "video_reader.hpp"
+
 #define posix_memalign(p, a, s) (((*(p)) = _aligned_malloc((s), (a))), *(p) ?0 :errno)
 #pragma comment(lib, "strmiids.lib")
 #pragma comment(lib, "runtimeobject.lib")
@@ -110,7 +112,7 @@ public:
     {
         return m_Changed;
     }
-
+    
     VOID enable_epsilon(T epsilon)
     {
         m_EpsilonEnabled = TRUE;
@@ -208,6 +210,25 @@ bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_wid
     return true;
 }
 
+std::vector<std::string> get_all_files_names_within_folder(std::string folder)
+{
+    std::vector<std::string> names;
+    std::string search_path = folder + "/*.bk2";
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = ::FindFirstFileA(search_path.c_str(), &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            // read all (real) files in current folder
+            // , delete '!' read other 2 default folder . and ..
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                names.push_back(fd.cFileName);
+            }
+        } while (::FindNextFileA(hFind, &fd));
+        ::FindClose(hFind);
+    }
+    return names;
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPWSTR    lpCmdLine,
@@ -223,7 +244,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     freopen("CONOUT$", "w", stderr);
 
     BorderlessWindow window;
-    
+    //std::string
     if (!CreateDeviceWGL(window.m_hHWND.get(), &g_MainWindow))
     {
         CleanupDeviceWGL(window.m_hHWND.get(), &g_MainWindow);
@@ -276,20 +297,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     VideoReaderState vr_state;
     vr_state.sws_scaler_ctx = NULL;
-    if (!video_reader_open(&vr_state, "..\\res\\WarthogVignette.mp4")) {
+    //if (!video_reader_open(&vr_state, "..\\res\\WarthogVignette.mp4")) {
+    if (!video_reader_open(&vr_state, "..\\res\\FMS_h2_bg.bk2")) {
         printf("Couldn't open video file (make sure you set a video file that exists)\n");
         return 1;
     }
-    
     GLuint tex_handle;
     glGenTextures(1, &tex_handle);
     glBindTexture(GL_TEXTURE_2D, tex_handle);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    //glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
 
     constexpr int ALIGNMENT = 128;
     const int frame_width = vr_state.width;
@@ -301,6 +323,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         return 1;
     }
 
+    std::vector<std::string> bks = get_all_files_names_within_folder("..\\res");
+    for (auto s : bks)
+    {
+        std::cout << s << std::endl;
+    }
     // Main loop
     bool done = false;
     MSG msg;
@@ -431,6 +458,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             ImGui::Checkbox("Enable .bk2", &show);
             ImGui::End();
 
+            ImGui::Begin(".bk2alp", 0, window_flags);
+            ImGui::SeparatorText("Background Alpha");
+            static int alpha = 150;
+            ImGui::SliderInt("", &alpha, 0, 255);
+            ImGui::End();
             static float time = 0.0f;
             static SmartProperty<double> endFlag {-100};
             endFlag.enable_epsilon(0.0001);
@@ -443,23 +475,38 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 if (time > 0.0333f)
                 {
                     int64_t pts;
-                    if (!video_reader_read_frame(&vr_state, frame_data, &pts)) {
+                    if (!video_reader_read_frame(&vr_state, frame_data, &pts, alpha)) {
                         printf("Couldn't load video frame\n");
                         return 1;
                     }
-                    printf("%lf\n", pts * (double)vr_state.time_base.num / (double)vr_state.time_base.den);
+                    //printf("%lf\n", pts * (double)vr_state.time_base.num / (double)vr_state.time_base.den);
                     endFlag.m_Value = pts * (double)vr_state.time_base.num / (double)vr_state.time_base.den;
                     if (!endFlag.update()) video_reader_seek_frame(&vr_state, 0.00f);
 
                     glBindTexture(GL_TEXTURE_2D, tex_handle);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, frame_width, frame_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, frame_data);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame_width, frame_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, frame_data);
                     time = 0.00f;
                 }
                 ImGui::GetBackgroundDrawList()->AddImage((void*)(intptr_t)tex_handle, start, end);
             }
+            {
+                static SmartProperty<INT> bk{ 0 };
+                ImGui::Begin("Backgrounds", 0);
+                for (int i = 0; i < bks.size(); ++i)
+                {
+                    ImGui::RadioButton(bks.at(i).c_str(), &bk.m_Value, i);
+                }
+                ImGui::End();
+                if (bk.update())
+                {
+                    video_reader_close(&vr_state);
+                    std::string newBk = "..\\res\\" + bks.at(bk.m_Value);
+                    vr_state.sws_scaler_ctx = NULL;
+                    video_reader_open(&vr_state, newBk.c_str());
+                }
+            }
             time += ImGui::GetIO().DeltaTime;
         }
-
         // Rendering
         ImGui::Render();
         glClearColor(0, 0, 0, 0);
