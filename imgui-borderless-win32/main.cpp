@@ -11,7 +11,7 @@
 #include <dwmapi.h>
 #include <GL/gl.h>
 
-// Courtesy of 
+// Courtesy of https://gist.github.com/sylveon/9c199bb6684fe7dffcba1e3d383fb609
 #include "swcadef.h"
 static const auto SetWindowCompositionAttribute = 
 reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowCompositionAttribute"));
