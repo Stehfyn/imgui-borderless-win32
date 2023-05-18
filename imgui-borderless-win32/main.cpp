@@ -31,9 +31,8 @@ struct WGL_WindowData { HDC hDC; };
 // Data
 static HGLRC            g_hRC;
 static WGL_WindowData   g_MainWindow;
-static int              g_Width;
-static int              g_Height;
-static bool             g_Focused;
+static int              g_Width;  // Unused
+static int              g_Height; // Unused
 
 // Forward declarations of helper functions
 bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data);
@@ -60,7 +59,7 @@ public:
         if (m_Value == m_LastValue) m_Changed = FALSE;
         else m_Changed = TRUE;
         m_LastValue = m_Value;
-        return m_Changed;  
+        return m_Changed;
     }
 
     BOOL has_changed() const
