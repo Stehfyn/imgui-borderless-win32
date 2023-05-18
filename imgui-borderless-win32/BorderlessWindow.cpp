@@ -1,3 +1,5 @@
+// Adapted from https://github.com/melak47/BorderlessWindow
+
 #include "BorderlessWindow.hpp"
 
 #include <stdexcept>
@@ -7,7 +9,6 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <iostream>
-#include "swcadef.h"
 
 namespace 
 {
@@ -110,6 +111,14 @@ BorderlessWindow::BorderlessWindow()
 	set_borderless(true);
 	set_borderless_shadow(true);
 	::ShowWindow(m_hHWND.get(), SW_SHOW);
+
+#ifdef BORDERLESS_DEBUG
+	AllocConsole();
+
+	freopen("CONIN$", "r", stdin);
+	freopen("CONOUT$", "w", stdout);
+	freopen("CONOUT$", "w", stderr);
+#endif
 }
 
 BorderlessWindow::BorderlessWindow(std::function<void()> render) 
@@ -181,7 +190,7 @@ UINT BorderlessWindow::get_height() const
 	return 0;
 }
 
-#ifdef USE_IMGUI
+#ifdef BORDERLESS_USE_IMGUI
 	extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 	std::function<LRESULT(HWND, UINT, WPARAM, LPARAM)> BorderlessWindow::m_ImGui_ImplWin32_WndProcHandler = ImGui_ImplWin32_WndProcHandler;
 #else
@@ -190,7 +199,7 @@ UINT BorderlessWindow::get_height() const
 
 LRESULT BorderlessWindow::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-#ifdef USE_IMGUI
+#ifdef BORDERLESS_USE_IMGUI
 	if (m_ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam))
 		return true;
 #endif
@@ -261,8 +270,10 @@ LRESULT BorderlessWindow::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 		case WM_SYSCOMMAND:
 			if ((wparam & 0xfff0) == SC_KEYMENU) // Disable ALT application menu
 				return 0;
+#ifdef BORDERLESS_DEBUG
 			if ((wparam & 0xF012))
 				std::cout << "DRAG MOVE\n";
+#endif
 			break;
 
 		case WM_DESTROY:

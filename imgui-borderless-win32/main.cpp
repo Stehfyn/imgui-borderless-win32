@@ -1,9 +1,6 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#define _CRT_SECURE_NO_WARNINGS
-#define _ALLOW_KEYWORD_MACROS
-#define inline __inline
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -11,53 +8,24 @@
 #include "backends/imgui_impl_win32.h"
 
 #include <windows.h>
-#include <windowsx.h>
-#include <GL/gl.h>
-#include <GL/glu.h>
-
 #include <dwmapi.h>
+#include <GL/gl.h>
+
+// Courtesy of 
+#include "swcadef.h"
+static const auto SetWindowCompositionAttribute = 
+reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowCompositionAttribute"));
 
 #pragma comment (lib, "opengl32.lib")
 #pragma comment (lib, "glu32.lib")
 #pragma comment (lib, "dwmapi.lib")
-#pragma comment( lib, "msimg32.lib" )
 
-#include "swcadef.h"
-static const auto SetWindowCompositionAttribute = 
-reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleHandle(L"user32.dll"), "SetWindowCompositionAttribute"));
-#define STB_IMAGE_IMPLEMENTATION
-#define GL_CLAMP_TO_EDGE 0x812F
-#include "stb_image.h"
-
-#include <atomic>
-#include <iostream>
-#include <utility>
-#include <unordered_map>
 #include <string>
 #include <vector>
-#include <mutex>
-#include <thread>
-#include <cassert>
-#include <stdexcept>
-#include <assert.h>
-#include <tchar.h>
-#include <filesystem>
 
-#define USE_IMGUI
+#define BORDERLESS_USE_IMGUI // Tell BorderlessWindow to call ImGui_ImplWin32_WndProcHandler in WndProc
+#define BORDERLESS_DEBUG     // Alloc a console to our Windows subsytem process
 #include "BorderlessWindow.hpp"
-#include "video_reader.hpp"
-
-#define posix_memalign(p, a, s) (((*(p)) = _aligned_malloc((s), (a))), *(p) ?0 :errno)
-#pragma comment(lib, "strmiids.lib")
-#pragma comment(lib, "runtimeobject.lib")
-#pragma comment( lib, "msimg32.lib" )
-#pragma comment(lib, "Ws2_32.lib")
-#pragma comment(lib, "mfuuid.lib")
-#pragma comment (lib, "libavformat.a")
-#pragma comment (lib, "libavcodec.a")
-#pragma comment (lib, "libavutil.a")
-#pragma comment( lib, "libswscale.a" )
-#pragma comment( lib, "libswresample.a" )
 
 // Data stored per platform window
 struct WGL_WindowData { HDC hDC; };
@@ -73,7 +41,9 @@ static bool             g_Focused;
 bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data);
 void CleanupDeviceWGL(HWND hWnd, WGL_WindowData* data);
 //void ResetDeviceWGL();
-LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// Borderless Window implements WndProc
+// LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // SmartProperty notifies on value change
 template <typename T>
@@ -85,63 +55,25 @@ public:
     SmartProperty(T value)
         : m_Value(value),
         m_LastValue(value),
-        m_Changed(FALSE)
-    {
-
-    }
+        m_Changed(FALSE) { }
 
     BOOL update()
     {
-        if (!m_EpsilonEnabled)
-        {
-            if (m_Value == m_LastValue) m_Changed = FALSE;
-            else m_Changed = TRUE;
-            m_LastValue = m_Value;
-            return m_Changed;
-        }
-        else
-        {
-            if ((m_Value <= m_LastValue + m_Epsilon) && (m_Value >= m_LastValue - m_Epsilon)) m_Changed = FALSE;
-            else m_Changed = TRUE;
-            m_LastValue = m_Value;
-            return m_Changed;
-        }
+        if (m_Value == m_LastValue) m_Changed = FALSE;
+        else m_Changed = TRUE;
+        m_LastValue = m_Value;
+        return m_Changed;  
     }
 
     BOOL has_changed() const
     {
         return m_Changed;
     }
-    
-    VOID enable_epsilon(T epsilon)
-    {
-        m_EpsilonEnabled = TRUE;
-        m_Epsilon = epsilon;
-    }
 
 private:
     T m_LastValue;
-    T m_Epsilon;
-    BOOL m_EpsilonEnabled{};
     BOOL m_Changed;
-
 };
-
-int SliderIntPow2(const char* label, int* v, int v_min, int v_max)
-{
-    int pow2min = static_cast<int>(std::log2(v_min));
-    int pow2max = static_cast<int>(std::log2(v_max));
-
-    int pow2v = static_cast<int>(std::log2(*v));
-    if (pow2v < pow2min) pow2v = pow2min;
-    if (pow2v > pow2max) pow2v = pow2max;
-
-    if (ImGui::SliderInt(label, &pow2v, pow2min, pow2max)) {
-        *v = static_cast<int>(std::pow(2, pow2v));
-        return true;
-    }
-    return false;
-}
 
 static void Hook_Renderer_CreateWindow(ImGuiViewport* viewport)
 {
@@ -176,75 +108,18 @@ static void Hook_Renderer_SwapBuffers(ImGuiViewport* viewport, void*)
         ::SwapBuffers(data->hDC);
 }
 
-bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_width, int* out_height)
-{
-    // Load from file
-    int image_width = 0;
-    int image_height = 0;
-    unsigned char* image_data = stbi_load(filename, &image_width, &image_height, NULL, 4);
-    if (image_data == NULL)
-        return false;
-
-    // Create a OpenGL texture identifier
-    GLuint image_texture;
-    glGenTextures(1, &image_texture);
-    glBindTexture(GL_TEXTURE_2D, image_texture);
-
-    // Setup filtering parameters for display
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); // This is required on WebGL for non power-of-two textures
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); // Same
-
-    // Upload pixels into texture
-#if defined(GL_UNPACK_ROW_LENGTH) && !defined(__EMSCRIPTEN__)
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-#endif
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image_width, image_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
-    stbi_image_free(image_data);
-
-    *out_texture = image_texture;
-    *out_width = image_width;
-    *out_height = image_height;
-
-    return true;
-}
-
-std::vector<std::string> get_all_files_names_within_folder(std::string folder)
-{
-    std::vector<std::string> names;
-    std::string search_path = folder + "/*.bk2";
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind = ::FindFirstFileA(search_path.c_str(), &fd);
-    if (hFind != INVALID_HANDLE_VALUE) {
-        do {
-            // read all (real) files in current folder
-            // , delete '!' read other 2 default folder . and ..
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                names.push_back(fd.cFileName);
-            }
-        } while (::FindNextFileA(hFind, &fd));
-        ::FindClose(hFind);
-    }
-    return names;
-}
-
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPWSTR    lpCmdLine,
     _In_ int       nCmdShow)
 {
+    UNREFERENCED_PARAMETER(hInstance);
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(lpCmdLine);
+    UNREFERENCED_PARAMETER(nCmdShow);
 
-#ifdef USE_IMGUI
-    //For Debug
-    AllocConsole();
+    BorderlessWindow window; // Instantiate our borderless window
 
-    freopen("CONIN$", "r", stdin);
-    freopen("CONOUT$", "w", stdout);
-    freopen("CONOUT$", "w", stderr);
-
-    BorderlessWindow window;
-    //std::string
     if (!CreateDeviceWGL(window.m_hHWND.get(), &g_MainWindow))
     {
         CleanupDeviceWGL(window.m_hHWND.get(), &g_MainWindow);
@@ -295,46 +170,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     }
     //ImGui::GetIO().ConfigViewportsNoDecoration = false;
 
-    VideoReaderState vr_state;
-    vr_state.sws_scaler_ctx = NULL;
-    //if (!video_reader_open(&vr_state, "..\\res\\WarthogVignette.mp4")) {
-    if (!video_reader_open(&vr_state, "..\\res\\FMS_h2_bg.bk2")) {
-        printf("Couldn't open video file (make sure you set a video file that exists)\n");
-        return 1;
-    }
-    GLuint tex_handle;
-    glGenTextures(1, &tex_handle);
-    glBindTexture(GL_TEXTURE_2D, tex_handle);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-    //glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_ADD);
-
-    constexpr int ALIGNMENT = 128;
-    const int frame_width = vr_state.width;
-    const int frame_height = vr_state.height;
-    uint8_t* frame_data;
-
-    if (posix_memalign((void**)&frame_data, ALIGNMENT, frame_width * frame_height * 4) != 0) {
-        printf("Couldn't allocate frame buffer\n");
-        return 1;
-    }
-
-    std::vector<std::string> bks = get_all_files_names_within_folder("..\\res");
-    for (auto s : bks)
-    {
-        std::cout << s << std::endl;
-    }
     // Main loop
     bool done = false;
     MSG msg;
     ImVec4 clear_color = ImVec4(.0f, .0f, .0f, 0.f);
+
     while (!done)
     {
-
         while (::PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE))
         {
             ::TranslateMessage(&msg);
@@ -342,13 +184,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             if (msg.message == WM_QUIT)
                 done = true;
         }
-        if (done)
-            break;
+        if (done) break;
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
-        GLuint image_texture;
         {
             // Dockspace
             {
@@ -362,7 +202,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
             ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
             {
-                static bool show = true;
                 if (ImGui::Begin("Borderless Settings", 0, window_flags))
                 {
                     static SmartProperty<INT> window_mode{ 1 };
@@ -375,8 +214,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
             // Borderless Demo
             {
+                // DWM api is undocumented, and has varying behavior between Windows Releases
+                // Therefore Accent Flags and Animation Flags are essentially trial and error :)
+                // On my system, Accent Flags set to 1 allows for the desired effects in regards
+                // to Accent State.
+                // 
+                // These are just default values that achieve the desired effect on my system
+                // Windows 10 Build 19044
+
                 ImGui::Begin("DWM Accent State", 0, window_flags);
-                static SmartProperty<INT> accent_policy { ACCENT_DISABLED };
+                static SmartProperty<INT> accent_policy { ACCENT_ENABLE_BLURBEHIND };
                 ImGui::SeparatorText("DWM Accent State");
                 ImGui::RadioButton("DISABLED", &accent_policy.m_Value, ACCENT_DISABLED);
                 ImGui::RadioButton("GRADIENT", &accent_policy.m_Value, ACCENT_ENABLE_GRADIENT);
@@ -390,8 +237,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 ImGui::Begin("DWM Accent Flags", 0, window_flags);
                 ImGui::SeparatorText("DWM Accent Flags");
                 static SmartProperty<INT> accent_flags{ 1 };
-                //ImGui::SliderInt("Accent Flags", &accent_flags.m_Value, 0 , 32);
-                SliderIntPow2("Accent Flags", &accent_flags.m_Value, 1, 256);
+                ImGui::SliderInt("Accent Flags", &accent_flags.m_Value, 0 , 255);
                 ImGui::End();
 
                 ImGui::Begin("DWM Gradient", 0, window_flags);
@@ -413,9 +259,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 gradient_col.update();
                 animation_id.update();
 
+                
+                static bool init_accents = true; //to apply default initialization
                 if (accent_policy.has_changed() || accent_flags.has_changed() 
-                    || gradient_col.has_changed() || animation_id.has_changed())
+                    || gradient_col.has_changed() || animation_id.has_changed()
+                    || init_accents)
                 {
+                    if (init_accents) init_accents = false;
+
                     ACCENT_POLICY policy = {
                     ACCENT_STATE(accent_policy.m_Value),
                     accent_flags.m_Value,
@@ -438,8 +289,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 static float f = 0.0f;
                 static int counter = 0;
                 ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-                static bool show = true;
-                if (ImGui::Begin("Example: Simple overlay", &show, window_flags))
+
+                if (ImGui::Begin("Example: Simple overlay", 0, window_flags))
                 {
                     if (ImGui::IsMousePosValid())
                         ImGui::Text("Mouse Position: (%.1f,%.1f)", io.MousePos.x, io.MousePos.y);
@@ -449,70 +300,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 }
                 ImGui::End();
             }
-
-            static float last_frame_time = 0.0f;
-            last_frame_time += ImGui::GetIO().DeltaTime;
-            window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-            ImGui::Begin("Enable .bk2", 0, window_flags);
-            static bool show = true;
-            ImGui::Checkbox("Enable .bk2", &show);
-            ImGui::End();
-
-            ImGui::Begin(".bk2alp", 0, window_flags);
-            ImGui::SeparatorText("Background Alpha");
-            static int alpha = 150;
-            ImGui::SliderInt("", &alpha, 0, 255);
-            ImGui::End();
-            static float time = 0.0f;
-            static SmartProperty<double> endFlag {-100};
-            endFlag.enable_epsilon(0.0001);
-            if(show)
-            {
-                RECT wRect{};
-                GetWindowRect(window.m_hHWND.get(), &wRect);
-                ImVec2 start{ (float)wRect.left, (float)wRect.top };
-                ImVec2 end{ (float)wRect.right, (float)wRect.bottom };
-                if (time > 0.0333f)
-                {
-                    int64_t pts;
-                    if (!video_reader_read_frame(&vr_state, frame_data, &pts, alpha)) {
-                        printf("Couldn't load video frame\n");
-                        return 1;
-                    }
-                    //printf("%lf\n", pts * (double)vr_state.time_base.num / (double)vr_state.time_base.den);
-                    endFlag.m_Value = pts * (double)vr_state.time_base.num / (double)vr_state.time_base.den;
-                    if (!endFlag.update()) video_reader_seek_frame(&vr_state, 0.00f);
-
-                    glBindTexture(GL_TEXTURE_2D, tex_handle);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame_width, frame_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, frame_data);
-                    time = 0.00f;
-                }
-                ImGui::GetBackgroundDrawList()->AddImage((void*)(intptr_t)tex_handle, start, end);
-            }
-            {
-                static SmartProperty<INT> bk{ 0 };
-                ImGui::Begin("Backgrounds", 0);
-                for (int i = 0; i < bks.size(); ++i)
-                {
-                    ImGui::RadioButton(bks.at(i).c_str(), &bk.m_Value, i);
-                }
-                ImGui::End();
-                if (bk.update())
-                {
-                    video_reader_close(&vr_state);
-                    std::string newBk = "..\\res\\" + bks.at(bk.m_Value);
-                    vr_state.sws_scaler_ctx = NULL;
-                    video_reader_open(&vr_state, newBk.c_str());
-                }
-            }
-            time += ImGui::GetIO().DeltaTime;
         }
+
         // Rendering
         ImGui::Render();
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        glDeleteTextures(1, &image_texture);
+
         // Update imgui window rects for hit testing
         {
             // Get ScreenPos offset
@@ -521,14 +316,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             RECT r;
             GetWindowRect(handle, &r);
 
-            // Only apply offset if Multi-viewports are enabled
+            // Only apply offset if Multi-viewports are not enabled
             ImVec2 origin = { (float)r.left, (float)r.top };
             if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
             {
                 origin = { 0, 0 };
             }
 
-            // Add imgui windows that aren't default rects/dockspaces/etc to client area whitelist
+            // Add imgui windows that aren't default rects/dockspaces/etc to client area whitelist, but explicitly include imgui demo
             std::vector<RECT> WindowRects;
             for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
             {
@@ -562,22 +357,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     return 0;
 
-#else
-    try {
-        BorderlessWindow window;
-        std::vector<RECT> rects = { {0, 0, 100, 100}, {1820, 0, 1920, 100} };
-        //window.set_client_area(rects);
-
-        MSG msg;
-        while (::GetMessageW(&msg, nullptr, 0, 0) == TRUE) {
-            ::TranslateMessage(&msg);
-            ::DispatchMessageW(&msg);
-        }
-    }
-    catch (const std::exception& e) {
-        ::MessageBoxA(nullptr, e.what(), "Unhandled Exception", MB_OK | MB_ICONERROR);
-}
-#endif
 } // main
 
 bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data)

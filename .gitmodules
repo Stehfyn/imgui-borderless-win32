@@ -2,6 +2,3 @@
 	path = imgui-borderless-win32/imgui
 	url = https://github.com/ocornut/imgui
 	branch = docking
-[submodule "stb"]
-	path = imgui-borderless-win32/stb
-	url = https://github.com/nothings/stb

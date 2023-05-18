@@ -1,4 +1,5 @@
 #pragma once
+// Adapted from https://github.com/melak47/BorderlessWindow
 
 #include <functional>
 #include <memory>
@@ -7,8 +8,6 @@
 
 #include <Windows.h>
 #include "imgui.h"
-
-#define USE_IMGUI
 
 struct hwnd_deleter {
     using pointer = HWND;
@@ -43,7 +42,7 @@ private:
 
 private:
     std::vector<RECT> m_vClientRects;
-    std::function<void()> m_fRender;
+    std::function<void()> m_fRender; // currently unused, but will be necessary for proper redraw on resize
     static std::function<LRESULT(HWND, UINT, WPARAM, LPARAM)> m_ImGui_ImplWin32_WndProcHandler;
 
     UINT m_uWidth;
