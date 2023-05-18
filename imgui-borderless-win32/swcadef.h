@@ -1,5 +1,5 @@
 #pragma once
-#pragma once
+// Courtesy of https://gist.github.com/sylveon/9c199bb6684fe7dffcba1e3d383fb609
 #include <windows.h>
 // Values and names extracted from twinui.pdb (April 2018 update), documented by toying with the API.
 // Output from DIA2Dump above the definitions.
