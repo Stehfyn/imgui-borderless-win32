@@ -2,8 +2,9 @@
 Combines win32 [BorderlessWindows](https://github.com/melak47/BorderlessWindow) with a [transparent opengl rendering context](https://stackoverflow.com/questions/4052940/how-to-make-an-opengl-rendering-context-with-transparent-background) to achieve advanced Windows DWM behavior for ImGui viewports.
 
 | DWM Snapping | DWM Composition | DWM Accent Policy |
-| --- | --- | --- |
+| :---: | :---: | :---: |
 | ![](res/dwm_drag_snap.gif)  | ![](res/dwm_composition_attributes.gif)  | ![](res/dwm_accent_policy.gif) |
+| drag-snap from client area | alpha composition separate from glClearColor | aero, mica, acrylic |
 
 ## Concept
 To enable dragging from some custom client area, our `WndProc` needs to return `HTCAPTION` when we know we're not over an imgui window. Therefore our `WndProc` needs to do those hittests with knowledge of those window rects:
