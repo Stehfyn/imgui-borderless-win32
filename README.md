@@ -6,6 +6,21 @@ Combines win32 [BorderlessWindows](https://github.com/melak47/BorderlessWindow) 
 | ![](res/dwm_drag_snap.gif)  | ![](res/dwm_composition_attributes.gif)  | ![](res/dwm_accent_policy.gif) |
 | drag-snap from client area | alpha composition separate from glClearColor | aero, mica, acrylic |
 
+## Demo
+To try out the example you can clone the repository and its submodule:
+```bash
+git clone --recursive https://github.com/Stehfyn/imgui-borderless-win32
+```
+Or do the following if you cloned the repo non-recursively already:
+```bash
+cd imgui-borderless-win32
+git submodule update --init --recursive
+```
+Then open `imgui-borderless-win32.sln` with `Visual Studio` and build, or with the `Developer Command Prompt for VS` just do
+```bash
+cd imgui-borderless-win32
+msbuild /m /p:Configuration=Release .
+```
 ## Concept
 To enable dragging from some custom client area, our `WndProc` needs to return `HTCAPTION` when we know we're not over an imgui window. Therefore our `WndProc` needs to do those hittests with knowledge of those window rects:
 ```cpp
