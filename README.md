@@ -64,5 +64,6 @@ BorderlessWindow window; // Instantiate our borderless window
 It's undocumented, and has varying behavior and performance bugs across different Windows 10 Builds and Windows 11. This demo has default flag values that work great for **Windows 10 Build 19044**, but some research and testing is required for feature parity across different versions. The following links may be helpful in understanding more about the `SetWindowCompositionAttribute` API:
 
 - https://github.com/sylveon/windows-swca
+- https://github.com/Maplespe/ExplorerBlurMica
 - https://github.com/TranslucentTB/TranslucentTB
 - https://gist.github.com/sylveon/9c199bb6684fe7dffcba1e3d383fb609
