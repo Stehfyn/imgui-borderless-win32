@@ -183,173 +183,183 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         }
         if (done) break;
 
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-        {
-            // Dockspace
+        static auto render = [&]() {
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
             {
-                ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
-            }
-
-            // ImGui Demo
-            {
-                ImGui::ShowDemoWindow();
-            }
-
-            ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-            {
-                if (ImGui::Begin("Borderless Settings", 0, window_flags))
+                // Dockspace
                 {
-                    static SmartProperty<INT> window_mode{ 1 };
-                    ImGui::RadioButton("Windowed", &window_mode.m_Value, 0);
-                    ImGui::RadioButton("Borderless", &window_mode.m_Value, 1);
-                    if (window_mode.update()) window.set_borderless(window_mode.m_Value);
+                    ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
                 }
-                ImGui::End();
-            }
 
-            // Borderless Demo
-            {
-                // DWM api is undocumented, and has varying behavior between Windows Releases
-                // Therefore Accent Flags and Animation Flags are essentially trial and error :)
-                // On my system, Accent Flags set to 1 allows for the desired effects in regards
-                // to Accent State.
-                // 
-                // These are just default values that achieve the desired effect on my system
-                // Windows 10 Build 19044
-
-                ImGui::Begin("DWM Accent State", 0, window_flags);
-                static SmartProperty<INT> accent_policy { ACCENT_ENABLE_BLURBEHIND };
-                ImGui::SeparatorText("DWM Accent State");
-                ImGui::RadioButton("DISABLED", &accent_policy.m_Value, ACCENT_DISABLED);
-                ImGui::RadioButton("GRADIENT", &accent_policy.m_Value, ACCENT_ENABLE_GRADIENT);
-                ImGui::RadioButton("TRANSPARENT GRADIENT", &accent_policy.m_Value, ACCENT_ENABLE_TRANSPARENTGRADIENT);
-                ImGui::RadioButton("BLUR BEHIND", &accent_policy.m_Value, ACCENT_ENABLE_BLURBEHIND);
-                ImGui::RadioButton("ACRYLIC BLUR BEHIND", &accent_policy.m_Value, ACCENT_ENABLE_ACRYLICBLURBEHIND);
-                ImGui::RadioButton("HOST BACKDROP", &accent_policy.m_Value, ACCENT_ENABLE_HOSTBACKDROP);
-                ImGui::RadioButton("INVALID STATE", &accent_policy.m_Value, ACCENT_INVALID_STATE);
-                ImGui::End();
-
-                ImGui::Begin("DWM Accent Flags", 0, window_flags);
-                ImGui::SeparatorText("DWM Accent Flags");
-                static SmartProperty<INT> accent_flags{ 1 };
-                ImGui::SliderInt("Accent Flags", &accent_flags.m_Value, 0 , 255);
-                ImGui::End();
-
-                ImGui::Begin("DWM Gradient", 0, window_flags);
-                ImGui::SeparatorText("DWM Gradient");
-                static ImVec4 color = ImVec4(114.0f / 255.0f, 144.0f / 255.0f, 154.0f / 255.0f, 200.0f / 255.0f);
-                static SmartProperty<INT> gradient_col = { (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255)) };
-                ImGui::ColorPicker4("##picker", (float*)&color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
-                gradient_col.m_Value = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
-                ImGui::End();
-
-                ImGui::Begin("DWM Animation id", 0, window_flags);
-                ImGui::SeparatorText("DWM Animation id");
-                static SmartProperty<INT> animation_id{ 0 };
-                ImGui::SliderInt("Accent Flags", &animation_id.m_Value, 0 , 32);
-                ImGui::End();
-
-                accent_policy.update();
-                accent_flags.update();
-                gradient_col.update();
-                animation_id.update();
-
-                
-                static bool init_accents = true; //to apply default initialization
-                if (accent_policy.has_changed() || accent_flags.has_changed() 
-                    || gradient_col.has_changed() || animation_id.has_changed()
-                    || init_accents)
+                // ImGui Demo
                 {
-                    if (init_accents) init_accents = false;
-
-                    ACCENT_POLICY policy = {
-                    ACCENT_STATE(accent_policy.m_Value),
-                    accent_flags.m_Value,
-                    gradient_col.m_Value,
-                    animation_id.m_Value
-                    };
-
-                    const WINDOWCOMPOSITIONATTRIBDATA data = {
-                        WCA_ACCENT_POLICY,
-                        &policy,
-                        sizeof(policy)
-                    };
-
-                    SetWindowCompositionAttribute(window.m_hHWND.get(), &data);
+                    ImGui::ShowDemoWindow();
                 }
-            }
 
-            // Demo Overlay
-            {
-                static float f = 0.0f;
-                static int counter = 0;
                 ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-
-                if (ImGui::Begin("Example: Simple overlay", 0, window_flags))
                 {
-                    if (ImGui::IsMousePosValid())
-                        ImGui::Text("Mouse Position: (%.1f,%.1f)", io.MousePos.x, io.MousePos.y);
-                    else
-                        ImGui::Text("Mouse Position: <invalid>");
-                    ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+                    if (ImGui::Begin("Borderless Settings", 0, window_flags))
+                    {
+                        static SmartProperty<INT> window_mode{ 1 };
+                        ImGui::RadioButton("Windowed", &window_mode.m_Value, 0);
+                        ImGui::RadioButton("Borderless", &window_mode.m_Value, 1);
+                        if (window_mode.update()) window.set_borderless(window_mode.m_Value);
+                    }
+                    ImGui::End();
                 }
-                ImGui::End();
+
+                // Borderless Demo
+                {
+                    // DWM api is undocumented, and has varying behavior between Windows Releases
+                    // Therefore Accent Flags and Animation Flags are essentially trial and error :)
+                    // On my system, Accent Flags set to 1 allows for the desired effects in regards
+                    // to Accent State.
+                    // 
+                    // These are just default values that achieve the desired effect on my system
+                    // Windows 10 Build 19044
+
+                    ImGui::Begin("DWM Accent State", 0, window_flags);
+                    static SmartProperty<INT> accent_policy { ACCENT_ENABLE_BLURBEHIND };
+                    ImGui::SeparatorText("DWM Accent State");
+                    ImGui::RadioButton("DISABLED", &accent_policy.m_Value, ACCENT_DISABLED);
+                    ImGui::RadioButton("GRADIENT", &accent_policy.m_Value, ACCENT_ENABLE_GRADIENT);
+                    ImGui::RadioButton("TRANSPARENT GRADIENT", &accent_policy.m_Value, ACCENT_ENABLE_TRANSPARENTGRADIENT);
+                    ImGui::RadioButton("BLUR BEHIND", &accent_policy.m_Value, ACCENT_ENABLE_BLURBEHIND);
+                    ImGui::RadioButton("ACRYLIC BLUR BEHIND", &accent_policy.m_Value, ACCENT_ENABLE_ACRYLICBLURBEHIND);
+                    ImGui::RadioButton("HOST BACKDROP", &accent_policy.m_Value, ACCENT_ENABLE_HOSTBACKDROP);
+                    ImGui::RadioButton("INVALID STATE", &accent_policy.m_Value, ACCENT_INVALID_STATE);
+                    ImGui::End();
+
+                    ImGui::Begin("DWM Accent Flags", 0, window_flags);
+                    ImGui::SeparatorText("DWM Accent Flags");
+                    static SmartProperty<INT> accent_flags{ 1 };
+                    ImGui::SliderInt("Accent Flags", &accent_flags.m_Value, 0, 255);
+                    ImGui::End();
+
+                    ImGui::Begin("DWM Gradient", 0, window_flags);
+                    ImGui::SeparatorText("DWM Gradient");
+                    static ImVec4 color = ImVec4(114.0f / 255.0f, 144.0f / 255.0f, 154.0f / 255.0f, 200.0f / 255.0f);
+                    static SmartProperty<INT> gradient_col = { (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255)) };
+                    ImGui::ColorPicker4("##picker", (float*)&color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
+                    gradient_col.m_Value = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
+                    ImGui::End();
+
+                    ImGui::Begin("DWM Animation id", 0, window_flags);
+                    ImGui::SeparatorText("DWM Animation id");
+                    static SmartProperty<INT> animation_id{ 0 };
+                    ImGui::SliderInt("Accent Flags", &animation_id.m_Value, 0, 32);
+                    ImGui::End();
+
+                    accent_policy.update();
+                    accent_flags.update();
+                    gradient_col.update();
+                    animation_id.update();
+
+
+                    static bool init_accents = true; //to apply default initialization
+                    if (accent_policy.has_changed() || accent_flags.has_changed()
+                        || gradient_col.has_changed() || animation_id.has_changed()
+                        || init_accents)
+                    {
+                        if (init_accents) init_accents = false;
+
+                        ACCENT_POLICY policy = {
+                        ACCENT_STATE(accent_policy.m_Value),
+                        accent_flags.m_Value,
+                        gradient_col.m_Value,
+                        animation_id.m_Value
+                        };
+
+                        const WINDOWCOMPOSITIONATTRIBDATA data = {
+                            WCA_ACCENT_POLICY,
+                            &policy,
+                            sizeof(policy)
+                        };
+
+                        SetWindowCompositionAttribute(window.m_hHWND.get(), &data);
+                    }
+                }
+
+                // Demo Overlay
+                {
+                    static float f = 0.0f;
+                    static int counter = 0;
+                    ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+
+                    if (ImGui::Begin("Example: Simple overlay", 0, window_flags))
+                    {
+                        if (ImGui::IsMousePosValid())
+                            ImGui::Text("Mouse Position: (%.1f,%.1f)", io.MousePos.x, io.MousePos.y);
+                        else
+                            ImGui::Text("Mouse Position: <invalid>");
+                        ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+                    }
+                    ImGui::End();
+                }
             }
-        }
 
-        // Rendering
-        ImGui::Render();
-        glClearColor(0, 0, 0, 0);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            // Rendering
+            ImGui::Render();
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        // Update imgui window rects for hit testing
-        {
-            // Get ScreenPos offset
-            ImGuiViewport* vp = ImGui::GetMainViewport();
-            HWND handle = (HWND)vp->PlatformHandle;
-            RECT r;
-            GetWindowRect(handle, &r);
+            // Update imgui window rects for hit testing
+            {
+                // Get ScreenPos offset
+                ImGuiViewport* vp = ImGui::GetMainViewport();
+                HWND handle = (HWND)vp->PlatformHandle;
+                RECT r;
+                GetWindowRect(handle, &r);
 
-            // Only apply offset if Multi-viewports are not enabled
-            ImVec2 origin = { (float)r.left, (float)r.top };
+                // Only apply offset if Multi-viewports are not enabled
+                ImVec2 origin = { (float)r.left, (float)r.top };
+                if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+                {
+                    origin = { 0, 0 };
+                }
+
+                // Add imgui windows that aren't default rects/dockspaces/etc to client area whitelist, but explicitly include imgui demo
+                std::vector<RECT> WindowRects;
+                for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
+                {
+                    if ((!(std::string(window->Name).find("Default") != std::string::npos) &&
+                        (!(std::string(window->Name).find("Dock") != std::string::npos)) &&
+                        (!(std::string(window->Name).find("Menu") != std::string::npos))) ||
+                        (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
+                    {
+                        ImVec2 pos = window->Pos;
+                        ImVec2 size = window->Size;
+                        RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
+                        WindowRects.push_back(rect);
+                    }
+                }
+                window.set_client_area(WindowRects);
+            }
+
+            // Update and Render additional Platform Windows
             if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
             {
-                origin = { 0, 0 };
+                ImGui::UpdatePlatformWindows();
+                ImGui::RenderPlatformWindowsDefault();
+
+                // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
+                wglMakeCurrent(g_MainWindow.hDC, g_hRC);
             }
 
-            // Add imgui windows that aren't default rects/dockspaces/etc to client area whitelist, but explicitly include imgui demo
-            std::vector<RECT> WindowRects;
-            for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
-            {
-                if ((!(std::string(window->Name).find("Default") != std::string::npos) &&
-                    (!(std::string(window->Name).find("Dock") != std::string::npos)) &&
-                    (!(std::string(window->Name).find("Menu") != std::string::npos))) ||
-                    (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
-                {
-                    ImVec2 pos = window->Pos;
-                    ImVec2 size = window->Size;
-                    RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
-                    WindowRects.push_back(rect);
-                }
-            }
-            window.set_client_area(WindowRects);
+            // Present
+            ::SwapBuffers(g_MainWindow.hDC);
+        };
+
+        static bool set_render = false;
+        if (!set_render) {
+            window.set_render_callback(render); //render when we are stuck in the message loop doing wm_sizing and wm_move
+            set_render = true;
         }
-
-        // Update and Render additional Platform Windows
-        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-        {
-            ImGui::UpdatePlatformWindows();
-            ImGui::RenderPlatformWindowsDefault();
-
-            // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
-            wglMakeCurrent(g_MainWindow.hDC, g_hRC);
-        }
-
-        // Present
-        ::SwapBuffers(g_MainWindow.hDC);
+        
+        render(); //render when we leave message loop
     }
 
     return 0;

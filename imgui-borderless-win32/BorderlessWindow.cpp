@@ -9,9 +9,14 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <iostream>
+#include <unordered_map>
+
 
 namespace 
 {
+	static UINT timer_id = 0;
+	static std::unordered_map<HWND, BorderlessWindow*> s_BorderlessInstanceMap;
+
 	enum class Style : DWORD 
 	{
 		windowed = WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
@@ -99,13 +104,15 @@ namespace
 
 		if (!handle) throw last_error("failed to create window");
 
+
 		return unique_handle{ handle };
 	}
 }
 
 BorderlessWindow::BorderlessWindow()
-	: m_hHWND{ create_window(&BorderlessWindow::WndProc, this) }
+	: m_hHWND{ create_window(&this->BorderlessWindow::WndProc, this) }
 {
+	s_BorderlessInstanceMap.insert({ m_hHWND.get(), this });
 	GetClassNameW(m_hHWND.get(), m_wstrWC, 256);
 	set_composition(true);
 	set_borderless(true);
@@ -230,6 +237,7 @@ LRESULT BorderlessWindow::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 					GET_X_LPARAM(lparam),
 					GET_Y_LPARAM(lparam)
 			};
+			
 			//::ScreenToClient(hwnd, &cursor);
 			if (window.m_bBorderless) {
 				return window.hit_test(cursor);
@@ -261,19 +269,61 @@ LRESULT BorderlessWindow::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 			break;
 
 		case WM_SIZE:
+		{
 			if (wparam != SIZE_MINIMIZED)
 			{
 				window.m_uWidth = LOWORD(lparam);
 				window.m_uHeight = HIWORD(lparam);
 			}
+
 			return 0;
+		}
+		case WM_SIZING: 
+		{
+			if (wparam != SIZE_MINIMIZED)
+			{
+				window.m_uWidth = LOWORD(lparam);
+				window.m_uHeight = HIWORD(lparam);
+			}
+
+			auto it = s_BorderlessInstanceMap.find(hwnd);
+			if (it != s_BorderlessInstanceMap.end() && it->second) {
+				it->second->render_callback();
+			}
+		}
+		case WM_MOVE:
+		{
+			if (wparam != SIZE_MINIMIZED)
+			{
+				window.m_uWidth = LOWORD(lparam);
+				window.m_uHeight = HIWORD(lparam);
+			}
+
+			auto it = s_BorderlessInstanceMap.find(hwnd);
+			if (it != s_BorderlessInstanceMap.end() && it->second) {
+				it->second->render_callback();
+			}
+		}
+		case WM_ENTERSIZEMOVE: {
+			SetTimer(hwnd, (UINT_PTR)&timer_id, USER_TIMER_MINIMUM, NULL);
+			return 0;
+		}
+		case WM_EXITSIZEMOVE: {
+			KillTimer(hwnd, (UINT_PTR)&timer_id);
+			break;
+		}
+		case WM_TIMER: {
+			auto it = s_BorderlessInstanceMap.find(hwnd);
+			if (it != s_BorderlessInstanceMap.end() && it->second) {
+				it->second->render_callback();
+			}
+			break;
+		}
+
 		case WM_SYSCOMMAND:
 			if ((wparam & 0xfff0) == SC_KEYMENU) // Disable ALT application menu
 				return 0;
-#ifdef BORDERLESS_DEBUG
-			if ((wparam & 0xF012))
-				std::cout << "DRAG MOVE\n";
-#endif
+
 			break;
 
 		case WM_DESTROY:

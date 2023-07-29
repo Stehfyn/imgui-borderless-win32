@@ -9,7 +9,6 @@
 #include <Windows.h>
 #include "imgui.h"
 
-#define BORDERLESS_DEBUG     // Alloc a console to our Windows subsytem process
 #define BORDERLESS_USE_IMGUI // Tell BorderlessWindow to call ImGui_ImplWin32_WndProcHandler in WndProc
 
 struct hwnd_deleter {
@@ -27,6 +26,8 @@ public:
     BorderlessWindow();
     BorderlessWindow(std::function<void()> render);
 
+    VOID render_callback() { if (m_fRender) m_fRender(); };
+    VOID set_render_callback(std::function<void()> render) { m_fRender = render; };
     VOID set_composition(BOOL enabled);
     VOID set_borderless(BOOL enabled);
     VOID set_borderless_shadow(BOOL enabled);
