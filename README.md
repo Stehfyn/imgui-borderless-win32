@@ -4,7 +4,7 @@ Combines win32 [BorderlessWindows](https://github.com/melak47/BorderlessWindow) 
 | DWM Snapping | DWM Composition | DWM Accent Policy | Continuous Draw |
 | :---: | :---: | :---: | :---: |
 | ![](res/dwm_drag_snap.gif)  | ![](res/dwm_composition_attributes.gif)  | ![](res/dwm_accent_policy.gif) | ![](res/continuous_draw.gif) |
-| drag-snap from client area | alpha composition separate from glClearColor | aero, mica, acrylic | drag, resize, hold |
+| drag-snap from client area | alpha separate from glClearColor | aero, mica, acrylic | drag, resize, hold |
 
 ## Demo
 To try out the example you can clone the repository and its submodule:
