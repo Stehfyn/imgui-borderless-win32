@@ -52,7 +52,10 @@ BorderlessWindow window; // Instantiate our borderless window
         {
             ImVec2 pos = window->Pos;
             ImVec2 size = window->Size;
-            RECT rect = { origin.x + pos.x, origin.y + pos.y, origin.x + (pos.x + size.x), origin.y + (pos.y + size.y) };
+            RECT rect = { origin.x + pos.x,
+                          origin.y + pos.y,
+                          origin.x + (pos.x + size.x),
+                          origin.y + (pos.y + size.y) };
             WindowRects.push_back(rect);
         }
     }
