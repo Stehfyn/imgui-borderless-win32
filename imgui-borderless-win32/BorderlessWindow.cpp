@@ -189,12 +189,12 @@ VOID BorderlessWindow::set_client_area(std::vector<RECT>&& client_rects)
 
 UINT BorderlessWindow::get_width() const
 {
-	return 0;
+	return m_uWidth;
 }
 
 UINT BorderlessWindow::get_height() const
 {
-	return 0;
+	return m_uHeight;
 }
 
 #ifdef BORDERLESS_USE_IMGUI

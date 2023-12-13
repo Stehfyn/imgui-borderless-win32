@@ -170,7 +170,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     // Main loop
     bool done = false;
     MSG msg;
-    ImVec4 clear_color = ImVec4(.0f, .0f, .0f, 0.f);
+    ImVec4 clear_color = ImVec4(.0f, .0f, .0f, .0f);
 
     while (!done)
     {
@@ -246,6 +246,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                     gradient_col.m_Value = (((int)(color.w * 255)) << 24) | (((int)(color.z * 255)) << 16) | (((int)(color.y * 255)) << 8) | ((int)(color.x * 255));
                     ImGui::End();
 
+                    ImGui::Begin("glClearColor", 0, window_flags);
+                    ImGui::SeparatorText("glClearColor");
+                    ImGui::ColorPicker4("##picker", (float*)&clear_color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
+                    ImGui::End();
+
                     ImGui::Begin("DWM Animation id", 0, window_flags);
                     ImGui::SeparatorText("DWM Animation id");
                     static SmartProperty<INT> animation_id{ 0 };
@@ -302,7 +307,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
             // Rendering
             ImGui::Render();
-            glClearColor(0, 0, 0, 0);
+            //glClearColor(0, 0, 0, 0);
+            glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
