@@ -22,7 +22,7 @@ reinterpret_cast<PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE>(GetProcAddress(GetModuleH
 
 #include <string>
 #include <vector>
-
+#include <iostream>
 #include "BorderlessWindow.hpp"
 
 // Data stored per platform window
@@ -117,18 +117,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     BorderlessWindow window; // Instantiate our borderless window
 
-    if (!CreateDeviceWGL(window.m_hHWND.get(), &g_MainWindow))
+    if (!CreateDeviceWGL(window.m_hWND, &g_MainWindow))
     {
-        CleanupDeviceWGL(window.m_hHWND.get(), &g_MainWindow);
-        ::DestroyWindow(window.m_hHWND.get());
+        CleanupDeviceWGL(window.m_hWND, &g_MainWindow);
+        ::DestroyWindow(window.m_hWND);
         ::UnregisterClassW((LPCWSTR)window.m_wstrWC, GetModuleHandle(NULL));
         return 1;
     }
 
     wglMakeCurrent(g_MainWindow.hDC, g_hRC);
 
-    ::ShowWindow(window.m_hHWND.get(), SW_SHOWDEFAULT);
-    ::UpdateWindow(window.m_hHWND.get());
+    ::ShowWindow(window.m_hWND, SW_SHOWDEFAULT);
+    ::UpdateWindow(window.m_hWND);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -150,7 +150,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     }
 
     // Setup Platform/Renderer backends
-    ImGui_ImplWin32_InitForOpenGL(window.m_hHWND.get());
+    ImGui_ImplWin32_InitForOpenGL(window.m_hWND);
     ImGui_ImplOpenGL3_Init();
 
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -165,6 +165,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         platform_io.Renderer_SwapBuffers = Hook_Renderer_SwapBuffers;
         platform_io.Platform_RenderWindow = Hook_Platform_RenderWindow;
     }
+
     //ImGui::GetIO().ConfigViewportsNoDecoration = false;
 
     // Main loop
@@ -174,6 +175,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     while (!done)
     {
+        static bool swap_styles = false; // Make sure we swap styles outside the WndProc
+        static bool borderless  = true;  // Borderless Window's default constructs to borderless
+
         while (::PeekMessage(&msg, NULL, 0U, 0U, PM_REMOVE))
         {
             ::TranslateMessage(&msg);
@@ -182,6 +186,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 done = true;
         }
         if (done) break;
+
+        // If we want to swap styles
+        if (swap_styles)
+        {
+            borderless = !borderless;
+            window.set_borderless(borderless);
+            swap_styles = false;
+        }
 
         static auto render = [&]() {
             ImGui_ImplOpenGL3_NewFrame();
@@ -202,14 +214,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                 {
                     if (ImGui::Begin("Borderless Settings", 0, window_flags))
                     {
-                        static SmartProperty<INT> window_mode{ 1 };
+                        static SmartProperty<INT> window_mode{ static_cast<int>(borderless) };
                         ImGui::RadioButton("Windowed", &window_mode.m_Value, 0);
                         ImGui::RadioButton("Borderless", &window_mode.m_Value, 1);
-                        if (window_mode.update()) window.set_borderless(window_mode.m_Value);
+                        if (window_mode.update()) swap_styles = true;
                     }
                     ImGui::End();
                 }
-
+                
                 // Borderless Demo
                 {
                     // DWM api is undocumented, and has varying behavior between Windows Releases
@@ -235,7 +247,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                     ImGui::Begin("DWM Accent Flags", 0, window_flags);
                     ImGui::SeparatorText("DWM Accent Flags");
                     static SmartProperty<INT> accent_flags{ 1 };
-                    ImGui::SliderInt("Accent Flags", &accent_flags.m_Value, 0, 255);
+                    ImGui::InputInt("Accent Flags", &accent_flags.m_Value, 0, 255);
+                    ImGui::End();
+
+                    ImGui::Begin("DWM Animation id", 0, window_flags);
+                    ImGui::SeparatorText("DWM Animation id");
+                    static SmartProperty<INT> animation_id{ 0 };
+                    ImGui::SliderInt("Accent Flags", &animation_id.m_Value, 0, 32);
                     ImGui::End();
 
                     ImGui::Begin("DWM Gradient", 0, window_flags);
@@ -251,11 +269,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                     ImGui::ColorPicker4("##picker", (float*)&clear_color, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
                     ImGui::End();
 
-                    ImGui::Begin("DWM Animation id", 0, window_flags);
-                    ImGui::SeparatorText("DWM Animation id");
-                    static SmartProperty<INT> animation_id{ 0 };
-                    ImGui::SliderInt("Accent Flags", &animation_id.m_Value, 0, 32);
+                    ImGui::Begin("ImGui Window Bg", 0, window_flags);
+                    ImGui::SeparatorText("ImGuiCol_WindowBgAlpha");
+                    static SmartProperty<float> bg_alpha{ 1 };
+                    ImGui::SliderFloat("BgAlpha", &bg_alpha.m_Value, 1, 0);
+                    if (bg_alpha.update()) {
+                        ImVec4 window_bg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+                        window_bg.w = bg_alpha.m_Value;
+                        ImGui::GetStyle().Colors[ImGuiCol_WindowBg] = window_bg;
+                    }
                     ImGui::End();
+
 
                     accent_policy.update();
                     accent_flags.update();
@@ -263,7 +287,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                     animation_id.update();
 
 
-                    static bool init_accents = true; //to apply default initialization
+                    static bool init_accents = false; //to apply default initialization
                     if (accent_policy.has_changed() || accent_flags.has_changed()
                         || gradient_col.has_changed() || animation_id.has_changed()
                         || init_accents)
@@ -283,7 +307,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                             sizeof(policy)
                         };
 
-                        SetWindowCompositionAttribute(window.m_hHWND.get(), &data);
+                        SetWindowCompositionAttribute(window.m_hWND, &data);
                     }
                 }
 
@@ -365,7 +389,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             set_render = true;
         }
         
-        render(); //render when we leave message loop
+        render(); // and render when we leave message loop
     }
 
     return 0;
