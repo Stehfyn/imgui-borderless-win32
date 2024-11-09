@@ -51,7 +51,7 @@
     <ClInclude Include="stb\stb_image.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="BorderlessWindow.hpp">
+    <ClInclude Include="win32_window.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -83,7 +83,7 @@
     <ClCompile Include="imgui\backends\imgui_impl_opengl2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="BorderlessWindow.cpp">
+    <ClCompile Include="win32_window.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
