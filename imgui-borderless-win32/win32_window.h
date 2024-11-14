@@ -2,7 +2,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <tchar.h>
-#include <assert.h>
 
 typedef struct win32_window_s win32_window_t;
 typedef LRESULT(*win32_wndproc_hook_t)(HWND, UINT, WPARAM, LPARAM);
@@ -20,6 +19,7 @@ win32_window_create(
     win32_window_t* w32Window,
     INT             width,
     INT             height,
+    UINT            styleWc,
     DWORD           styleEx,
     DWORD           style);
 

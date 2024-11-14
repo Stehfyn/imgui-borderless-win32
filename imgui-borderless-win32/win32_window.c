@@ -1,7 +1,7 @@
 #include "win32_window.h"
-
+#include <assert.h>
 #include <windowsx.h>
-
+#include <uxtheme.h>
 LRESULT WINAPI
 win32_wndproc(
     HWND   hWnd,
@@ -14,13 +14,14 @@ win32_window_create(
     win32_window_t* w32Window,
     INT             width,
     INT             height,
+    UINT            styleWc,
     DWORD           styleEx,
     DWORD           style)
 {
     WNDCLASSEX wcex = {0};
     {
         wcex.cbSize = sizeof(wcex);
-        wcex.style = CS_VREDRAW | CS_HREDRAW | CS_OWNDC;
+        wcex.style = styleWc;
         wcex.lpfnWndProc = (WNDPROC)win32_wndproc;
         wcex.hInstance = NULL;
         wcex.lpszClassName = _T("win32_window");
@@ -35,7 +36,7 @@ win32_window_create(
     w32Window->hWnd = CreateWindowEx(
         styleEx,
         wcex.lpszClassName,
-        _T("daedulus-demo"),
+        _T("imgui-borderless-win32"),
         style,
         CW_USEDEFAULT, CW_USEDEFAULT, width, height,
         NULL, NULL, NULL, w32Window->pThis
@@ -57,6 +58,9 @@ win32_wndproc(
     if (msg == WM_NCCREATE) {
         LPVOID userdata = (LPVOID)((LPCREATESTRUCT)lParam)->lpCreateParams;
         SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)userdata);
+        //SetWindowTheme(hWnd, _T("WINDOW"), L" ");
+        //SetThemeAppProperties(STAP_ALLOW_NONCLIENT | STAP_ALLOW_CONTROLS | STAP_ALLOW_WEBCONTENT);
+        //OpenThemeData(hWnd, L"COMPOSITEDWINDOW");
     }
 
     w32Window = (win32_window_t*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
