@@ -24,42 +24,63 @@ msbuild /m /p:Configuration=Release .
 ## Concept
 To enable dragging from some custom client area, our `WndProc` needs to return `HTCAPTION` when we know we're not over an imgui window. Therefore our `WndProc` needs to do those hittests with knowledge of those window rects:
 ```cpp
-BorderlessWindow window; // Instantiate our borderless window
 // ...
 // (In Render Loop) Update imgui window rects for hit testing
 {
-    // Get ScreenPos offset
-    ImGuiViewport* vp = ImGui::GetMainViewport();
-    HWND handle = (HWND)vp->PlatformHandle;
-    RECT r;
-    GetWindowRect(handle, &r);
-
-    // Only apply offset if Multi-viewports are not enabled
-    ImVec2 origin = { (float)r.left, (float)r.top };
-    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+    ImVec2 origin = { 0, 0 };
+    if (!(io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)) // Only apply offset if Multi-viewports are not enabled
     {
-        origin = { 0, 0 };
+        RECT r;
+        GetWindowRect(hWnd, &r); // Get ScreenPos offset
+        origin = { (float)r.left, (float)r.top };
     }
 
-    // Add imgui windows that aren't default rects/dockspaces/etc to client area whitelist, but explicitly include imgui demo
+    // EXAMPLE:
+    // Add imgui windows that aren't default rects/dockspaces/windows over viewports,
+    // etc. to client area whitelist, but explicitly include imgui demo
     std::vector<RECT> WindowRects;
     for (ImGuiWindow* window : ImGui::GetCurrentContext()->Windows)
     {
-        if ((!(std::string(window->Name).find("Default") != std::string::npos) &&
-            (!(std::string(window->Name).find("Dock") != std::string::npos)) &&
-            (!(std::string(window->Name).find("Menu") != std::string::npos))) ||
-            (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
-        {
-            ImVec2 pos = window->Pos;
-            ImVec2 size = window->Size;
-            RECT rect = { origin.x + pos.x,
-                          origin.y + pos.y,
-                          origin.x + (pos.x + size.x),
-                          origin.y + (pos.y + size.y) };
-            WindowRects.push_back(rect);
+        if(window->Active)
+        { 
+            if ((!(std::string(window->Name).find("Default") != std::string::npos)  &&
+                (!(std::string(window->Name).find("Dock")    != std::string::npos)) &&
+                (!(std::string(window->Name).find("Menu")    != std::string::npos)) &&
+                (!(std::string(window->Name).find("WindowOverViewport") != std::string::npos))) ||
+                (std::string(window->Name).find("Dear ImGui Demo") != std::string::npos))
+            {
+                ImVec2 pos  = window->Pos;
+                ImVec2 size = window->Size;
+                RECT   rect = { (LONG)(origin.x + pos.x),
+                                (LONG)(origin.y + pos.y),
+                                (LONG)(origin.x + (pos.x + size.x)),
+                                (LONG)(origin.y + (pos.y + size.y)) };
+
+                WindowRects.push_back(rect);
+            }
         }
     }
-    window.set_client_area(WindowRects);
+    g_ClientCustomClientArea = std::move(WindowRects);
+}
+
+// ... (In the WndProc) Update imgui window rects for hit testing
+case WM_NCHITTEST: {
+    switch (result) {
+    case left:           return HTLEFT;
+    case right:          return HTRIGHT;
+    case top:            return HTTOP;
+    case bottom:         return HTBOTTOM;
+    case top | left:     return HTTOPLEFT;
+    case top | right:    return HTTOPRIGHT;
+    case bottom | left:  return HTBOTTOMLEFT;
+    case bottom | right: return HTBOTTOMRIGHT;
+    case client: {
+        for (RECT rect : g_ClientCustomClientArea)
+            if (PtInRect(&rect, cursor)) return HTCLIENT;
+        return HTCAPTION;
+    }
+    default: return HTNOWHERE;
+    }
 }
 ```
 

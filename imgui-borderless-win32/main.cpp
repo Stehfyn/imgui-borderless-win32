@@ -2,15 +2,17 @@ extern "C"{
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <windowsx.h>
+#include <shellscalingapi.h>
 #include <dwmapi.h>
 #include <GL/gl.h>
 #include "win32_window.h"
 #include "swcadef.h"      // Courtesy of https://gist.github.com/sylveon/9c199bb6684fe7dffcba1e3d383fb609
 }
 
+#pragma comment (lib, "shcore")
+#pragma comment (lib, "dwmapi")
 #pragma comment (lib, "opengl32")
 #pragma comment (lib, "glu32")
-#pragma comment (lib, "dwmapi")
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -52,7 +54,9 @@ static void Hook_Renderer_DestroyWindow(ImGuiViewport* viewport);
 static void Hook_Platform_RenderWindow(ImGuiViewport* viewport, void*);
 static void Hook_Renderer_SwapBuffers(ImGuiViewport* viewport, void*);
 
-int APIENTRY wWinMain(
+int 
+APIENTRY 
+wWinMain(
     _In_ HINSTANCE     hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPWSTR        lpCmdLine,
@@ -63,29 +67,37 @@ int APIENTRY wWinMain(
     UNREFERENCED_PARAMETER(lpCmdLine);
     UNREFERENCED_PARAMETER(nCmdShow);
 
-    ImGui_ImplWin32_EnableDpiAwareness();
-    win32_window_t w32Window = {0};
-    win32_window_create(&w32Window, 1080, 720, 0, ImGuiBorderlessWin32::windowed);
-    w32Window.msgHook = (win32_wndproc_hook_t)WndProcHook;
+    win32_window_t win32_window = { 0 };
 
-    if (!CreateDeviceWGL(w32Window.hWnd, &g_MainWindow))
+    HRESULT hr = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE); // This can be set by a program's manifest or its corresponding registry settings
+    if (E_INVALIDARG == hr)
     {
-        CleanupDeviceWGL(w32Window.hWnd, &g_MainWindow);
-        ::DestroyWindow(w32Window.hWnd);
-        ::UnregisterClass(w32Window.tcClassName, GetModuleHandle(NULL));
+        return 1;
+    }
+
+    win32_window_create(&win32_window, 1080, 720, 0, ImGuiBorderlessWin32::windowed);
+    win32_window.msgHook = (win32_wndproc_hook_t)WndProcHook;
+
+    if (!CreateDeviceWGL(win32_window.hWnd, &g_MainWindow))
+    {
+        CleanupDeviceWGL(win32_window.hWnd, &g_MainWindow);
+        ::DestroyWindow(win32_window.hWnd);
+        ::UnregisterClass(win32_window.tcClassName, GetModuleHandle(NULL));
         return 1;
     }
 
     wglMakeCurrent(g_MainWindow.hDC, g_hRC);
 
-    ::ShowWindow(w32Window.hWnd, SW_SHOWDEFAULT);
-    ::UpdateWindow(w32Window.hWnd);
+    ::ShowWindow(win32_window.hWnd, SW_SHOWDEFAULT);
+    ::UpdateWindow(win32_window.hWnd);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;       // Enable Docking
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;     // Enable Multi-Viewport / Platform Windows
+    io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;
+    io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports;
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
@@ -98,8 +110,9 @@ int APIENTRY wWinMain(
     }
 
     // Setup Platform/Renderer backends
-    ImGui_ImplWin32_InitForOpenGL((void*)w32Window.hWnd);
+    ImGui_ImplWin32_InitForOpenGL((void*)win32_window.hWnd);
     ImGui_ImplOpenGL3_Init();
+    ImGui_ImplWin32_EnableDpiAwareness();
 
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
     {
@@ -117,13 +130,14 @@ int APIENTRY wWinMain(
     for(;;)
     {
         MSG msg; //- Pump message loop; break on WM_QUIT
-        if (!win32_window_pump_message_loop(&w32Window, &msg, FALSE)) break;
+        if (!win32_window_pump_message_loop(&win32_window, &msg, FALSE)) break;
 
         //- Set the client render function callback if not done so already (So we can also render in sizemoves)
         if (!g_ClientRenderFunction)
         {
-            g_ClientRenderFunction = [io](HWND hWnd) {
+            g_ClientRenderFunction = [](HWND hWnd) {
                 static ImVec4 clear_color(.0f, .0f, .0f, .0f);
+                ImGuiIO& io = ImGui::GetIO();
 
                 ImGui_ImplOpenGL3_NewFrame();
                 ImGui_ImplWin32_NewFrame();
@@ -204,17 +218,17 @@ int APIENTRY wWinMain(
         }
         
         //- Then just make that client render call like usual
-        g_ClientRenderFunction(w32Window.hWnd);
+        g_ClientRenderFunction(win32_window.hWnd);
     }
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
 
-    CleanupDeviceWGL(w32Window.hWnd, &g_MainWindow);
+    CleanupDeviceWGL(win32_window.hWnd, &g_MainWindow);
     wglDeleteContext(g_hRC);
-    ::DestroyWindow(w32Window.hWnd);
-    ::UnregisterClass(w32Window.tcClassName, GetModuleHandle(NULL));
+    ::DestroyWindow(win32_window.hWnd);
+    ::UnregisterClass(win32_window.tcClassName, GetModuleHandle(NULL));
 
     return 0;
 } // main
