@@ -245,26 +245,25 @@ LRESULT WINAPI WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg) {
     case WM_NCCALCSIZE: {
         if (wParam && g_ClientIsBorderless) {
-            WINDOWPLACEMENT placement = {0};
-            if (::GetWindowPlacement(hWnd, &placement)) 
-            {
-                if (placement.showCmd == SW_MAXIMIZE)
-                {
-                    NCCALCSIZE_PARAMS* params = (NCCALCSIZE_PARAMS*)lParam;
+            NCCALCSIZE_PARAMS* params = (NCCALCSIZE_PARAMS*)lParam;
+            if(IsMaximized(hWnd)) {
 
-                    HMONITOR monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONULL);
-                    if (!monitor) return 0;
+                HMONITOR monitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONULL);
+                if (!monitor) return 0;
 
-                    MONITORINFO monitor_info = {0};
-                    monitor_info.cbSize = sizeof(monitor_info);
-                    if (!GetMonitorInfo(monitor, &monitor_info)) return 0;
+                MONITORINFO monitor_info = {0};
+                monitor_info.cbSize = sizeof(monitor_info);
+                if (!GetMonitorInfo(monitor, &monitor_info)) return 0;
 
-                    // when maximized, make the client area fill just the monitor (without task bar) rect,
-                    // not the whole window rect which extends beyond the monitor.
-                    params->rgrc[0] = monitor_info.rcWork;
-                }
+                // when maximized, make the client area fill just the monitor (without task bar) rect,
+                // not the whole window rect which extends beyond the monitor.
+                params->rgrc[0] = monitor_info.rcWork;
+                return 0;
             }
-            return 0;
+            else {
+                params->rgrc[0].bottom += 1;
+                return WVR_VALIDRECTS;
+            }
         }
         break;
     }
@@ -328,8 +327,10 @@ LRESULT WINAPI WndProcHook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
     case WM_TIMER: {
-        if (g_ClientRenderFunction) // Ensure this is the root hWnd
+        if (g_ClientRenderFunction) {
             g_ClientRenderFunction(hWnd);
+            DwmFlush();
+        }
         return 1;
     }
     case WM_ERASEBKGND: // Prevent flicker when we're rendering during resize
