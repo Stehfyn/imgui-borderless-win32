@@ -83,7 +83,7 @@
     <ClCompile Include="imgui\backends\imgui_impl_opengl2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="win32_window.c">
+    <ClCompile Include="win32_window.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
