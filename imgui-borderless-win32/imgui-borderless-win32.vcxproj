@@ -161,6 +161,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="wglex.h" />
     <ClInclude Include="imgui\backends\imgui_impl_opengl2.h" />
     <ClInclude Include="imgui\backends\imgui_impl_opengl3.h" />
     <ClInclude Include="imgui\backends\imgui_impl_opengl3_loader.h" />
@@ -173,7 +174,7 @@
     <ClInclude Include="imgui\imstb_truetype.h" />
     <ClInclude Include="stb\stb_image.h" />
     <ClInclude Include="swcadef.h" />
-    <ClInclude Include="win32_window.h" />
+    <ClInclude Include="BorderlessWindow.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="imgui\backends\imgui_impl_opengl2.cpp" />
@@ -185,7 +186,8 @@
     <ClCompile Include="imgui\imgui_tables.cpp" />
     <ClCompile Include="imgui\imgui_widgets.cpp" />
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="win32_window.cpp" />
+    <ClCompile Include="BorderlessWindow.cpp" />
+    <ClCompile Include="wglex.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

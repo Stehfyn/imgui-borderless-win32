@@ -1,7 +1,8 @@
-#include "win32_window.h"
+#include "BorderlessWindow.h"
 
 #include <windowsx.h>
 #include <dwmapi.h>
+#pragma comment(lib, "atls")
 
 extern "C" { 
   BOOL EndTask(
@@ -10,6 +11,11 @@ extern "C" {
       BOOL fForce
       );
 }
+
+/****** GDI Macro APIs *******************************************************/
+#define ABS(x)         ((x < 0) ? -x : x)
+#define RECTWIDTH(rc)  (ABS(rc.right - rc.left))
+#define RECTHEIGHT(rc) (ABS(rc.bottom - rc.top))
 
 /****** Message crackers *****************************************************/
 
@@ -20,6 +26,13 @@ static
 VOID CFORCEINLINE CALLBACK
 SyncFrameChange(
     HWND hWnd
+    );
+
+static
+BOOL FORCEINLINE APIPRIVATE
+MonitorWorkRectFromWindow(
+    HWND   hwnd,
+    LPRECT rcWork
     );
 
 /****** Message Handlers *****************************************************/
@@ -38,6 +51,13 @@ OnNCActivate(
     BOOL fActive,
     HWND hwndActDeact,
     BOOL fMinimized
+    );
+
+static 
+VOID CFORCEINLINE CALLBACK
+OnNCPaint(
+    HWND hwnd,
+    HRGN hrgn
     );
 
 static 
@@ -152,8 +172,31 @@ VOID CFORCEINLINE CALLBACK
 SyncFrameChange(
     HWND hWnd)
 {
-    const DWORD dwFlags = SWP_NOSIZE | SWP_NOMOVE | SWP_FRAMECHANGED;
-    SetWindowPos(hWnd, 0, 0, 0, 0, 0, dwFlags);
+    const DWORD dwFlags = SWP_SHOWWINDOW | SWP_NOMOVE | SWP_FRAMECHANGED;
+    //HRGN region = ::CreateRectRgn(0, 0, -1, -1);
+    //DWM_BLURBEHIND bb = {};
+    //bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+    //bb.hRgnBlur = region;
+    //bb.fEnable = TRUE;
+    //DwmEnableBlurBehindWindow((HWND)hWnd, &bb);
+    //DeleteObject(region);
+    RECT rcWindow;
+    GetWindowRect(hWnd, &rcWindow);
+    SetWindowPos(hWnd, 0, 0, 0, RECTWIDTH(rcWindow), RECTHEIGHT(rcWindow), dwFlags);
+}
+
+static
+BOOL FORCEINLINE APIPRIVATE
+MonitorWorkRectFromWindow(
+    HWND   hwnd,
+    LPRECT lprcWork)
+{
+    MONITORINFO mi;
+    SecureZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    
+    return GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), (LPMONITORINFO)&mi) && 
+           CopyRect(lprcWork, &mi.rcWork);
 }
 
 static
@@ -164,8 +207,12 @@ OnNCCreate(
 {
     UINT_PTR offset;
 
+    AtlThunkData_t* timerproc;
+    timerproc = AtlThunk_AllocateData();
+    AtlThunk_InitData(timerproc, (LPVOID)lpCreateStruct->lpCreateParams, (size_t)(uintptr_t)hWnd);
+
     SetLastError(NO_ERROR);
-    offset = SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)lpCreateStruct->lpCreateParams);
+    offset = SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)timerproc);
 
     if ((offset == 0) && (NO_ERROR != GetLastError()))
       return FALSE;
@@ -189,6 +236,18 @@ OnNCActivate(
 }
 
 static 
+VOID CFORCEINLINE CALLBACK
+OnNCPaint(
+    HWND hwnd,
+    HRGN hrgn)
+{
+    UNREFERENCED_PARAMETER(hwnd);
+    UNREFERENCED_PARAMETER(hrgn);
+
+    ValidateRgn(hwnd, hrgn);
+}
+
+static 
 UINT CFORCEINLINE CALLBACK
 OnNCCalcSize(
     HWND hWnd,
@@ -197,28 +256,30 @@ OnNCCalcSize(
 {
     if (fCalcValidRects) 
     {
-      UINT dpi    = GetDpiForWindow(hWnd);
-      int frame_x = GetSystemMetricsForDpi(SM_CXFRAME, dpi);
-      int frame_y = GetSystemMetricsForDpi(SM_CYFRAME, dpi);
-      int padding = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-      RECT* requested_client_rect = lpcsp->rgrc;
-
-      requested_client_rect->right  -= frame_x + padding;
-      requested_client_rect->left   += frame_x + padding;
-      requested_client_rect->bottom -= frame_y + padding;
-
-      if (IsMaximized(hWnd)) {
-        requested_client_rect->top += padding;
+      if (IsMaximized(hWnd))
+      {
+        HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONULL);
+        if (!hMonitor)
+        {
+          return 0;
+        }
+        MONITORINFO mi = { 0 };
+        mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfo(hMonitor, &mi))
+        {
+          return 0;
+        }
+        lpcsp->rgrc[0] = mi.rcWork;
+        return 0;
       }
-
-      lpcsp->rgrc[1] = lpcsp->rgrc[2];
-
-      //DwmFlush();
-      
-      return 0;
+      else
+      {
+        lpcsp->rgrc[0].bottom += 1;
+        return WVR_VALIDRECTS;
+      }
     }
 
-    return 0;
+    return (UINT)FORWARD_WM_NCCALCSIZE(hWnd, fCalcValidRects, lpcsp, DefWindowProc);
 }
 
 static
@@ -244,8 +305,8 @@ OnNCHittest(
     CONST POINT cursor = {(LONG) x, (LONG) y};
     CONST SIZE  border =
     {
-      (LONG)(GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)),
-      (LONG)(GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi))  // Padded border is symmetric for both x, y
+      ((LONG)(GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi))),
+      ((LONG)(GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)))  // Padded border is symmetric for both x, y
     };
     RtlSecureZeroMemory(&rcWindow, sizeof(rcWindow));
     GetWindowRect(hWnd, &rcWindow);
@@ -296,8 +357,12 @@ OnCreate(
     HWND hWnd,
     LPCREATESTRUCT lpCreateStruct)
 {
+    UNREFERENCED_PARAMETER(lpCreateStruct);
+
     SyncFrameChange(hWnd);
+
     FORWARD_WM_CREATE(hWnd, lpCreateStruct, DefWindowProc);
+
     return TRUE;
 }
 
@@ -309,19 +374,20 @@ OnActivate(
     HWND hwndActDeact,
     BOOL fMinimized)
 {
-    if (!fMinimized)
-    {
-      HRGN hRgn;
-      DWM_BLURBEHIND bb;
-      const MARGINS margins = { 1,1,1,1 };
-      DwmExtendFrameIntoClientArea(hWnd, &margins);
-      bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
-      bb.fEnable = TRUE;
-      bb.hRgnBlur = hRgn = CreateRectRgn(0, 0, -1, -1);
-      DwmEnableBlurBehindWindow(hWnd, &bb);
-      DeleteRgn(hRgn);
-      SyncFrameChange(hWnd);
-    }
+    //if (!fMinimized)
+    //{
+    //  HRGN hRgn;
+    //  DWM_BLURBEHIND bb;
+    //  const MARGINS margins = { 1,1,1,1 };
+    //  DwmExtendFrameIntoClientArea(hWnd, &margins);
+    //  bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+    //  bb.fEnable = TRUE;
+    //  bb.hRgnBlur = hRgn = CreateRectRgn(0, 0, -1, -1);
+    //  DwmEnableBlurBehindWindow(hWnd, &bb);
+    //  DeleteRgn(hRgn);
+    //  SyncFrameChange(hWnd);
+    //}
+    SyncFrameChange(hWnd);
 
     FORWARD_WM_ACTIVATE(hWnd, state, hwndActDeact, fMinimized, DefWindowProc);
 }
@@ -331,9 +397,7 @@ VOID CFORCEINLINE CALLBACK
 OnPaint(
     HWND hWnd)
 {
-    PAINTSTRUCT ps;
-    BeginPaint(hWnd, &ps);
-    EndPaint(hWnd, &ps);
+    ValidateRect(hWnd, 0);
 }
 
 static
@@ -373,7 +437,7 @@ OnWindowPosChanging(
     HWND        hWnd,
     LPWINDOWPOS lpwpos)
 {
-    lpwpos->flags |= SWP_NOCOPYBITS;
+    lpwpos->flags |= SWP_NOCOPYBITS | SWP_NOREDRAW;
     return FORWARD_WM_WINDOWPOSCHANGING(hWnd, lpwpos, DefWindowProc);
 }
 
@@ -383,7 +447,6 @@ OnWindowPosChanged(
     HWND hWnd, 
     const LPWINDOWPOS lpwpos)
 {
-    DwmFlush();
     FORWARD_WM_WINDOWPOSCHANGED(hWnd, lpwpos, DefWindowProc);
 }
 
@@ -397,7 +460,7 @@ OnSysCommand(
 {
     switch (uCmd) {
     case SC_MOVE: {
-      PostMessage(hWnd, WM_MOUSEMOVE, 0, MAKELPARAM(-(MAXINT16 >> 1), -(MAXINT16 >> 1)));
+      PostMessage(hWnd, WM_MOUSEMOVE, 0, MAKELPARAM(0,0));
     }
     }
     
@@ -431,6 +494,7 @@ WndProc(
     switch(uMsg) {
     HANDLE_MSG(hWnd,  WM_NCCREATE,          OnNCCreate);
     HANDLE_MSG(hWnd,  WM_NCACTIVATE,        OnNCActivate);
+    HANDLE_MSG(hWnd,  WM_NCPAINT,           OnNCPaint);
     HANDLE_MSG(hWnd,  WM_NCCALCSIZE,        OnNCCalcSize);
     HANDLE_MSG(hWnd,  WM_NCHITTEST,         OnNCHittest);
     HANDLE_MSG(hWnd,  WM_NCMOUSEMOVE,       OnNCMouseMove);
@@ -441,9 +505,9 @@ WndProc(
     HANDLE_MSG(hWnd,  WM_ERASEBKGND,        OnEraseBkgnd);
     HANDLE_MSG(hWnd,  WM_KEYUP,             OnKeyUp);
     HANDLE_MSG(hWnd,  WM_WINDOWPOSCHANGING, OnWindowPosChanging);
-    HANDLE_MSG(hWnd,  WM_WINDOWPOSCHANGED,  OnWindowPosChanged);
     HANDLE_MSG(hWnd,  WM_CLOSE,             OnClose);
     HANDLE_MSG(hWnd,  WM_DESTROY,           OnDestroy);
+    HANDLE_MSG(hWnd,  WM_SYSCOMMAND,        OnSysCommand);
     FORWARD_MSG(hWnd, uMsg, wParam, lParam, DefWindowProc);
     }
 }
@@ -453,17 +517,16 @@ CreateBorderlessWindow(
     DWORD dwExStyle,
     DWORD dwStyle,
     int   nWidth,
-    int   nHeight)
+    int   nHeight,
+    DRAWPROC lpfnDrawProc)
 {
     HWND       hWnd;
     WNDCLASSEX wcex = { 0 };
 
     wcex.cbSize = sizeof(wcex);
-    wcex.style = CS_OWNDC | CS_DROPSHADOW; // CS_VREDRAW | CS_HREDRAW | 
-    wcex.lpfnWndProc = WndProc;
-    wcex.hInstance = NULL;
+    wcex.style = CS_OWNDC;
+    wcex.lpfnWndProc = (WNDPROC)WndProc;
     wcex.lpszClassName = _T("win32_window");
-    wcex.hbrBackground = (HBRUSH)(GetStockObject(BLACK_BRUSH));
     wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
     CONST ATOM _ = RegisterClassEx(&wcex); (VOID)_;
     assert(_);
@@ -475,7 +538,7 @@ CreateBorderlessWindow(
         _T("daedulus-demo"),
         dwStyle,
         CW_USEDEFAULT, CW_USEDEFAULT, nWidth, nHeight,
-        NULL, NULL, NULL, NULL
+        NULL, NULL, NULL, lpfnDrawProc
     );
 
     return hWnd;
