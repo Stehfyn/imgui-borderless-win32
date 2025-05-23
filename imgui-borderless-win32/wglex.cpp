@@ -71,11 +71,15 @@ typedef struct _D3DKMT_CLOSEADAPTER
 {
   D3DKMT_HANDLE   hAdapter;   // in: adapter handle
 } D3DKMT_CLOSEADAPTER;
-
+typedef struct _D3DKMT_CHECKOCCLUSION
+{
+  D3DKMT_PTR(HWND, hWindow);        // in:  Destination window handle
+} D3DKMT_CHECKOCCLUSION;
 EXTERN_C _Check_return_ NTSTATUS APIENTRY D3DKMTOpenAdapterFromHdc(_Inout_ D3DKMT_OPENADAPTERFROMHDC*);
 EXTERN_C _Check_return_ NTSTATUS APIENTRY D3DKMTWaitForVerticalBlankEvent(_In_ CONST D3DKMT_WAITFORVERTICALBLANKEVENT*);
 EXTERN_C _Check_return_ NTSTATUS APIENTRY D3DKMTGetScanLine(_Inout_ D3DKMT_GETSCANLINE*);
 EXTERN_C _Check_return_ NTSTATUS APIENTRY D3DKMTCloseAdapter(_In_ CONST D3DKMT_CLOSEADAPTER*);
+EXTERN_C _Check_return_ NTSTATUS APIENTRY D3DKMTCheckOcclusion(_In_ CONST D3DKMT_CHECKOCCLUSION*);
 
 static
 HWND
@@ -231,7 +235,7 @@ wglGetPixelFormat(
 
 EXTERN_C
 BOOL CFORCEINLINE CALLBACK
-wglWaitForVerticalBlank(
+wglWaitForVerticalBlank2(
     HWND hWnd)
 {
   NTSTATUS status;
@@ -287,4 +291,83 @@ wglWaitForVerticalBlank(
 
     return TRUE;
   }
+}
+
+EXTERN_C
+BOOL CFORCEINLINE CALLBACK
+wglCheckOcclusion(
+    HWND hWnd)
+{
+    NTSTATUS status;
+    D3DKMT_CHECKOCCLUSION co;
+
+    co.hWindow = hWnd;
+
+    status = D3DKMTCheckOcclusion(&co);
+
+    return 0 == status;
+}
+
+EXTERN_C
+BOOL CFORCEINLINE CALLBACK
+wglWaitForVerticalBlank(
+    HWND hWnd)
+{
+  NTSTATUS status;
+  D3DKMT_GETSCANLINE gsl;
+  D3DKMT_CLOSEADAPTER ca;
+  D3DKMT_OPENADAPTERFROMHDC oa;
+  D3DKMT_WAITFORVERTICALBLANKEVENT vbe;
+
+  oa.hDc = GetDC(hWnd);
+  status = D3DKMTOpenAdapterFromHdc(&oa);
+  ReleaseDC(hWnd, oa.hDc);
+    
+  if (0 != status)
+  {
+    return FALSE;
+  }
+
+  if (!oa.hAdapter)
+  {
+    return FALSE;
+  }
+
+  vbe.hAdapter      = ca.hAdapter = oa.hAdapter;
+  vbe.VidPnSourceId = oa.VidPnSourceId;
+  vbe.hDevice       = 0;
+
+  status = D3DKMTWaitForVerticalBlankEvent(&vbe);
+    
+  if (0 != status)
+  {
+    status = D3DKMTCloseAdapter(&ca);
+
+    if (0 != status)
+    {
+      __debugbreak();
+    }
+
+    return FALSE;
+  }
+
+  gsl.hAdapter      = vbe.hAdapter;
+  gsl.VidPnSourceId = vbe.VidPnSourceId;
+  gsl.ScanLine        = 0;
+  gsl.InVerticalBlank = 0;
+
+  do
+  {
+    status = D3DKMTGetScanLine(&gsl);
+
+  } while ((0 != status) || gsl.InVerticalBlank);
+
+  status = D3DKMTCloseAdapter(&ca);
+
+  if (0 != status)
+  {
+    __debugbreak();
+  }
+
+  return TRUE;
 }

@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#define IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DISABLE_DEFAULT_ALLOCATORS
 #include <windows.h>
 #include <windowsx.h>
@@ -9,6 +10,7 @@
 #include "swcadef.h"      // Courtesy of https://gist.github.com/sylveon/9c199bb6684fe7dffcba1e3d383fb609
 #include <GL/gl.h>
 #include <GL/wglext.h>
+#include "wglex.h"
 //#include <dcomp.h>
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -28,6 +30,7 @@ static void ShowDemoWindow(HWND hWnd, ImVec4& clearColor);
 // Data stored per platform window
 struct WGL_WindowData { HDC hDC; };
 #include <wingdi.h>
+#include <format>
 // Data
 static HGLRC            g_hRC;
 static WGL_WindowData   g_MainWindow;
@@ -58,8 +61,16 @@ ImGuiSubclassproc(
     UINT_PTR  uIdSubclass,
     DWORD_PTR dwRefData);
 
-#include "wglex.h"
-
+static
+LRESULT CALLBACK
+ImGuiMultiviewportSubclassproc(
+    HWND      hWnd,
+    UINT      uMsg,
+    WPARAM    wParam,
+    LPARAM    lParam,
+    UINT_PTR  uIdSubclass,
+    DWORD_PTR dwRefData);
+static void Test();
 static void Demo(void*)
 {
 
@@ -99,6 +110,7 @@ static void Demo(void*)
         style.WindowRounding = 0.0f;
         style.Colors[ImGuiCol_WindowBg].w = 1.0f;
     }
+
     // Circumvent CRT Heap Mismatch -- currently leaks handles when a non-primary viewport is merged
     ImGui::SetAllocatorFunctions(
         [](size_t sz, void*) { return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sz); },
@@ -128,7 +140,7 @@ static void Demo(void*)
 
     wglSwapIntervalEXT(0);
 
-    for(;;)
+    while(TRUE)
     {
         MSG msg;
 
@@ -142,6 +154,7 @@ static void Demo(void*)
         else
         {
           wglWaitForVerticalBlank(hWnd);
+
           Draw(hWnd);
 
           if (!GetInputState())
@@ -233,6 +246,12 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
       break;
       //return 0;
     }
+    //case WM_SIZING: {
+    //  LPRECT lprcDrag = (LPRECT)lParam;
+    //  g_Width = labs(lprcDrag->right - lprcDrag->left);
+    //  g_Height = labs(lprcDrag->bottom - lprcDrag->top);
+    //  break;
+    //}
     case WM_SIZE: {
       if (SIZE_MINIMIZED != wParam) 
       {
@@ -241,7 +260,6 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
         //glViewport(0, 0, g_Width, g_Height);
       }
       break;
-      //return 0;
     }
     case WM_TIMER: {
       wglWaitForVerticalBlank(hWnd);
@@ -251,10 +269,8 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
     }
     case WM_EXITMENULOOP:
     case WM_EXITSIZEMOVE: {
-      //wglSwapIntervalEXT(1);
       KillTimer(hWnd, 1);
       Draw(hWnd);
-      //wglSwapIntervalEXT(0);
       return 0;
     }
     default:
@@ -262,6 +278,47 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
     }
 
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+static
+LRESULT CALLBACK
+ImGuiMultiviewportSubclassproc(
+    HWND      hWnd,
+    UINT      uMsg,
+    WPARAM    wParam,
+    LPARAM    lParam,
+    UINT_PTR  uIdSubclass,
+    DWORD_PTR dwRefData)
+{
+    UNREFERENCED_PARAMETER(dwRefData);
+
+    switch (uMsg) {
+    case WM_ENTERMENULOOP:
+    case WM_ENTERSIZEMOVE: {
+      SetTimer(hWnd, 2, USER_TIMER_MINIMUM, (TIMERPROC)Draw);
+      return 0;
+    }
+    case WM_TIMER: {
+      wglWaitForVerticalBlank(GetParent(hWnd));
+      Draw(hWnd);
+      //DwmFlush();
+      return 0;
+    }
+    case WM_EXITMENULOOP:
+    case WM_EXITSIZEMOVE: {
+      KillTimer(hWnd, 2);
+      //Draw(hWnd);
+      return 0;
+    }
+    case WM_NCDESTROY:
+      RemoveWindowSubclass(hWnd, ImGuiMultiviewportSubclassproc, uIdSubclass);
+      break;
+    default:
+      break;
+    }
+
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+
 }
 
 static void Draw(HWND hWnd)
@@ -288,33 +345,43 @@ static void Draw(HWND hWnd)
         ImGuiBorderlessWin32::ShowDemoWindow(hWnd, clear_color);
     }
 
-    // Rendering
-    ImGui::Render();
-    glViewport(0, 0, g_Width, g_Height);
-    glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
-    glClear(GL_COLOR_BUFFER_BIT);
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-    // Update and Render additional Platform Windows
-    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
     {
-        ImGui::UpdatePlatformWindows();
-        ImGui::RenderPlatformWindowsDefault();
-
-        // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
-        wglMakeCurrent(g_MainWindow.hDC, g_hRC);
+      Test();
     }
 
-    SwapBuffers(g_MainWindow.hDC);
+    if (wglCheckOcclusion(hWnd))
+    {
+      // Rendering
+      ImGui::Render();
+      glViewport(0, 0, g_Width, g_Height);
+      glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
+      glClear(GL_COLOR_BUFFER_BIT);
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+      // Update and Render additional Platform Windows
+      if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+      {
+          ImGui::UpdatePlatformWindows();
+          ImGui::RenderPlatformWindowsDefault();
+
+          // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
+          wglMakeCurrent(g_MainWindow.hDC, g_hRC);
+      }
+
+      SwapBuffers(g_MainWindow.hDC);
+    }
 }
 
 static void Hack(HWND hWnd)
 {
+  if (!IsIconic(hWnd))
+  {
     POINT pt;
     if (GetCursorPos(&pt))
     {
       SendMessage(hWnd, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y));
     }
+  }
 }
 
 namespace ImGuiBorderlessWin32 {
@@ -363,8 +430,8 @@ void ShowDemoWindow(HWND hWnd, ImVec4& clearColor)
             }
             if (ImGui::Checkbox("Enable Border Shadow", &enable_border_shadow))
             {
-                static const MARGINS margins[2] = { {-1,-1,-1,-1}, {1,1,1,1} };
-                //static const MARGINS margins[2] = { {0,0,0,0}, {1,1,1,1} };
+                //static const MARGINS margins[2] = { {-1,-1,-1,-1}, {1,1,1,1} };
+                static const MARGINS margins[2] = { {0,0,0,0}, {1,1,1,1} };
                 ::DwmExtendFrameIntoClientArea(hWnd, &margins[enable_border_shadow]);
             }
         }
@@ -462,8 +529,8 @@ bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data)
       WGL_ALPHA_BITS_EXT, 8,
       WGL_SWAP_METHOD_EXT, WGL_SWAP_EXCHANGE_EXT,
       WGL_ACCELERATION_EXT, WGL_FULL_ACCELERATION_EXT,
-      WGL_SAMPLE_BUFFERS_EXT, 4,
-      0
+      //WGL_SAMPLE_BUFFERS_EXT, 4, 
+      GL_NONE
     };
 
     int pfEx = wglGetPixelFormat(hDc, pfAttribs);
@@ -480,8 +547,8 @@ bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data)
     ::ReleaseDC(hWnd, hDc);
     data->hDC = GetDC(hWnd);
     if (!g_hRC)
-      g_hRC = wglCreateContextAttribsARB(data->hDC, nullptr, nullptr);
-      //g_hRC = wglCreateContext(data->hDC);
+      //g_hRC = wglCreateContextAttribsARB(data->hDC, nullptr, nullptr);
+      g_hRC = wglCreateContext(data->hDC);
     return true;
 }
 
@@ -498,6 +565,7 @@ static void Hook_Renderer_CreateWindow(ImGuiViewport* viewport)
     WGL_WindowData* data = IM_NEW(WGL_WindowData);
     CreateDeviceWGL((HWND)viewport->PlatformHandle, data);
     viewport->RendererUserData = data;
+    SetWindowSubclass((HWND)viewport->PlatformHandle, ImGuiMultiviewportSubclassproc, 0, 0);
 }
 
 static void Hook_Renderer_DestroyWindow(ImGuiViewport* viewport)
@@ -523,6 +591,94 @@ static void Hook_Platform_RenderWindow(ImGuiViewport* viewport, void*)
 
 static void Hook_Renderer_SwapBuffers(ImGuiViewport* viewport, void*)
 {
-    if (WGL_WindowData* data = (WGL_WindowData*)viewport->RendererUserData)
-        ::SwapBuffers(data->hDC);
+  if (WGL_WindowData* data = (WGL_WindowData*)viewport->RendererUserData)
+  {
+    wglSwapIntervalEXT(0);
+    ::SwapBuffers(data->hDC);
+  }    
+        
+}
+
+static void Test()
+{
+  static float fov = 58.f;
+  static float hdg = 180.0f;
+  static const ImU32 c_green = ImGui::GetColorU32(ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
+
+
+  if (ImGui::Begin("bartest"))
+  {
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+    const float c_scale = 0.75f;
+    ImRect r = ImRect{ w->Pos, w->Pos + w->Size };
+
+    ImRect rs = ImRect{ r.GetCenter() - (r.GetSize() * 0.5f * c_scale), r.GetCenter() + (r.GetSize() * 0.5f * c_scale) };
+    ImGui::GetWindowDrawList()->AddRect(rs.Min, rs.Max, c_green);
+    ImVec2 s = w->Size;
+
+    static const auto c_centered = [](const char* cstr) -> ImVec2
+      { return ImVec2(-0.5f, -0.5f) * ImGui::CalcTextSize(cstr); };
+
+    static const auto c_radians = [](const float degrees) -> float
+      { return (degrees * 3.1459267f) / 180.0f; };
+
+    // Centered
+    {
+      auto str = std::format("{:2}", hdg);
+      ImVec2 start = w->Pos + ImVec2((0.5f * s.x), 40.0f + (0.5f * s.y));
+      ImGui::GetWindowDrawList()->AddRectFilled(start, start + ImVec2(5.0f, 30.0f), c_green);
+      ImGui::GetWindowDrawList()->AddText(start + ImVec2(2.5f, 2.5f * ImGui::GetFontSize()) + c_centered(str.c_str()), c_green, str.c_str());
+    }
+
+    ImGui::GetWindowDrawList()->PushClipRect(rs.Min, rs.Max);
+    for (int i = 0; i < 72; ++i)
+    {
+      float tick_angle = i * 5.0f;
+      float relative_angle = hdg - tick_angle;
+      float angle_delta = fabsf(relative_angle);
+
+      if (angle_delta < (0.5f * fov))
+      {
+
+        float x_delta;
+
+        {
+          float relative_angle_radians = c_radians(relative_angle);
+          float half_fov_radians = c_radians(0.5f * fov);
+
+          //x_delta = ((0.5f * rs.GetWidth()) * tanf((relative_angle * 3.14159267f) / 180.0f)) / tanf((((0.5f * fov) * 3.14159267f) / 180.0f));
+          x_delta = ((0.5f * rs.GetWidth()) * tanf(relative_angle_radians)) / tanf(half_fov_radians);
+        }
+
+        {
+          auto str = std::format("{:2}", tick_angle);
+          ImVec2 start = rs.Min + ImVec2((0.5f * rs.GetWidth()) + x_delta, 0.5f * rs.GetHeight());
+          ImGui::GetWindowDrawList()->AddRectFilled(start, start + ImVec2(5.0f, 10.0f), c_green);
+          ImGui::GetWindowDrawList()->AddText(start + ImVec2(2.5f, 1.5f * ImGui::GetFontSize()) + c_centered(str.c_str()), c_green, str.c_str());
+        }
+
+        //{
+        //  ImVec2 start = w->Pos + ImVec2((0.5f * s.x) - x_delta, 0.5f * s.y);
+        //  ImGui::GetWindowDrawList()->AddRectFilled(start, start + ImVec2(5.0f, 30.0f), c_green);
+        //}
+      }
+
+    }
+    ImGui::GetWindowDrawList()->PopClipRect();
+  }
+  ImGui::End();
+
+  if (ImGui::Begin("bartestmods"))
+  {
+    ImGuiWindow* w = ImGui::GetCurrentWindow();
+
+    ImVec2 s = w->Size;
+
+    //ImGui::SliderFloat("fov", &fov, 40.0f, 180.0f);
+    ImGui::SliderFloat("fov", &fov, 40.0f, 180.0f);
+    ImGui::SliderFloat("hdg", &hdg, 0.0f, 360.0f);
+
+
+  }
+  ImGui::End();
 }

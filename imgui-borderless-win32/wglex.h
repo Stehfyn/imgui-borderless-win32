@@ -29,3 +29,15 @@ BOOL CFORCEINLINE CALLBACK
 wglWaitForVerticalBlank(
     HWND hWnd
     );
+
+EXTERN_C
+BOOL CFORCEINLINE CALLBACK
+wglCheckOcclusion(
+    HWND hWnd
+    );
+
+EXTERN_C
+BOOL CFORCEINLINE CALLBACK
+wglWaitForVerticalBlank2(
+    HWND hWnd
+    );
