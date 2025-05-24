@@ -11,7 +11,10 @@
 #include <GL/gl.h>
 #include <GL/wglext.h>
 #include "wglex.h"
+#include <PathCch.h>
+#include <string>
 //#include <dcomp.h>
+#include "dpa_dsa.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "backends/imgui_impl_win32.h"
@@ -21,11 +24,34 @@
 #pragma comment (lib, "opengl32")
 #pragma comment (lib, "glu32")
 #pragma comment (lib, "Comctl32")
+#pragma comment (lib, "Pathcch")
 //#pragma comment (lib, "dcomp")
 namespace ImGuiBorderlessWin32 {
 static constexpr DWORD windowed   = WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 static constexpr DWORD borderless = WS_POPUPWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_VISIBLE;
 static void ShowDemoWindow(HWND hWnd, ImVec4& clearColor);
+}
+
+typedef struct tagImW32FontGallery {
+  TCHAR szDirectory[MAX_PATH];
+  int   cchDirectory;
+  HDPA  hDpaFontFiles;
+  int   cFontFiles;
+  int   nSelectedFile;
+  float nFontSize;
+  BOOL  fApplyThisFrame;
+  CHAR szBuf[MAX_PATH] = { 0 };
+  CHAR szBuf2[MAX_PATH] = { 0 };
+  CHAR szFilepath[MAX_PATH] = { 0 };
+  CHAR szFilepath2[MAX_PATH] = { 0 };
+} ImW32FontGallery;
+typedef struct tagImW32FontFile {
+  TCHAR szFilename[MAX_PATH];
+  size_t cchFilename;
+}ImW32FontFile;
+namespace ImW32 {
+  static BOOL AddFontDirectory(ImW32FontGallery* pFontGallery, LPCTSTR lpszDirectory, size_t cchDirectory);
+  static BOOL ShowFontGallery(ImW32FontGallery* pFontGallery);
 }
 // Data stored per platform window
 struct WGL_WindowData { HDC hDC; };
@@ -70,7 +96,6 @@ ImGuiMultiviewportSubclassproc(
     LPARAM    lParam,
     UINT_PTR  uIdSubclass,
     DWORD_PTR dwRefData);
-static void Test();
 static void Demo(void*)
 {
 
@@ -121,6 +146,17 @@ static void Demo(void*)
     ImGui_ImplWin32_InitForOpenGL(hWnd);
     ImGui_ImplOpenGL3_Init(nullptr);
     ImGui_ImplWin32_EnableDpiAwareness();
+    static ImW32FontGallery* pFontGallery;
+    io.FontDefault = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\SegoeUI.ttf", 16.0f);
+    if (!pFontGallery)
+    {
+      pFontGallery = (ImW32FontGallery*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ImW32FontGallery));
+      if (!pFontGallery)
+        ExitProcess(EXIT_FAILURE);
+
+      if (!ImW32::AddFontDirectory(pFontGallery, TEXT("C:\\Windows\\Fonts"), _countof(TEXT("C:\\Windows\\Fonts")) * sizeof(TCHAR)))
+        ExitProcess(EXIT_FAILURE);
+    }
 
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
     {
@@ -138,7 +174,8 @@ static void Demo(void*)
     if (!SetWindowSubclass(hWnd, ImGuiSubclassproc, 0, 0))
       ExitProcess(EXIT_FAILURE);
 
-    wglSwapIntervalEXT(0);
+    //wglSwapIntervalEXT(0);
+    wglSwapIntervalEXT(1);
 
     while(TRUE)
     {
@@ -221,15 +258,18 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
       return TRUE;
 
     switch (uMsg) {
-    case WM_CREATE:
-      SetTimer(hWnd, 67, 2 * USER_TIMER_MINIMUM, (TIMERPROC)Hack);
-      break;
+    case WM_DWMNCRENDERINGCHANGED:
+      return 0;
+    case 0x0313:
+      return 0;
     case WM_NCCALCSIZE: {
       if (wParam)
       {
     case WM_WINDOWPOSCHANGED:
-        wglWaitForVerticalBlank(hWnd);
+        LRESULT lResult = CallWindowProc(WndProc, hWnd, uMsg, wParam, lParam);
+        DwmFlush();
         Draw(hWnd);
+        return lResult;
       }
       break;
     }
@@ -243,15 +283,18 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
     case WM_ENTERMENULOOP:
     case WM_ENTERSIZEMOVE: {
       SetTimer(hWnd, 1, USER_TIMER_MINIMUM, (TIMERPROC)Draw);
-      break;
-      //return 0;
+      return 0;
     }
-    //case WM_SIZING: {
-    //  LPRECT lprcDrag = (LPRECT)lParam;
-    //  g_Width = labs(lprcDrag->right - lprcDrag->left);
-    //  g_Height = labs(lprcDrag->bottom - lprcDrag->top);
-    //  break;
-    //}
+    case WM_WINDOWPOSCHANGING: {
+      LPWINDOWPOS lpwpos = (LPWINDOWPOS)lParam;
+      if (!(SWP_NOSIZE & lpwpos->flags))
+      {
+        g_Width  = lpwpos->cx;
+        g_Height = lpwpos->cy;
+      }
+
+      return CallWindowProc(WndProc, hWnd, uMsg, wParam, lParam);
+    }
     case WM_SIZE: {
       if (SIZE_MINIMIZED != wParam) 
       {
@@ -259,10 +302,10 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
         g_Height = GET_Y_LPARAM(lParam);
         //glViewport(0, 0, g_Width, g_Height);
       }
-      break;
+      return 0;
     }
     case WM_TIMER: {
-      wglWaitForVerticalBlank(hWnd);
+      //wglWaitForVerticalBlank(hWnd);
       Draw(hWnd);
       DwmFlush();
       return 0;
@@ -273,11 +316,14 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
       Draw(hWnd);
       return 0;
     }
+      //return 0;
+    case WM_SYSCOMMAND:
     default:
       break;
     }
+    return CallWindowProc(WndProc, hWnd, uMsg, wParam, lParam);
 
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+    //return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
 
 static
@@ -321,9 +367,144 @@ ImGuiMultiviewportSubclassproc(
 
 }
 
+namespace ImW32 {
+  static BOOL AddFontDirectory(ImW32FontGallery* pFontGallery, LPCTSTR lpszDirectory, size_t cchDirectory)
+  {
+    HRESULT         hr;
+    HANDLE          hFile;
+    WIN32_FIND_DATA data;
+
+    if (pFontGallery->hDpaFontFiles)
+      return FALSE;
+
+    if (!lpszDirectory || !cchDirectory || (_countof(pFontGallery->szDirectory) < cchDirectory))
+      return FALSE;
+    
+    ZeroMemory(pFontGallery, sizeof(ImW32FontGallery));
+
+    if (!CopyMemory(pFontGallery->szDirectory, lpszDirectory, cchDirectory))
+      return FALSE;
+    
+    pFontGallery->cchDirectory = (int)cchDirectory;
+
+    hr = PathCchAddBackslash(pFontGallery->szDirectory, _countof((pFontGallery->szDirectory)));
+    if (S_OK != hr)
+      return FALSE;
+
+    hr = PathCchAppend(pFontGallery->szDirectory, _countof(pFontGallery->szDirectory), L"*.ttf");
+    if (S_OK != hr)
+      return FALSE;
+    
+    if (pFontGallery->hDpaFontFiles = DPA_CreateEx(1, GetProcessHeap()), !pFontGallery->hDpaFontFiles)
+      return FALSE;
+    
+    if (hFile = FindFirstFile(pFontGallery->szDirectory, &data), INVALID_HANDLE_VALUE != hFile)
+    {
+      PathCchRemoveFileSpec(pFontGallery->szDirectory, _countof(pFontGallery->szDirectory));
+      PathCchAddBackslash(pFontGallery->szDirectory, _countof((pFontGallery->szDirectory)));
+      do
+      {
+        ImW32FontFile* lpFontFile;
+        size_t cchFilename;
+        
+        cchFilename = _tcscnlen(data.cFileName, _countof(pFontGallery->szDirectory));
+    
+        lpFontFile = (ImW32FontFile*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ImW32FontFile));
+        
+        if (lpFontFile && CopyMemory(lpFontFile->szFilename, data.cFileName, cchFilename * sizeof(TCHAR) ))
+        {
+          lpFontFile->cchFilename = cchFilename;
+          //if (0 <= DPA_InsertPtr(pFontGallery->hDpaFontFiles, (int)(DPA_GetSize(pFontGallery->hDpaFontFiles) - 1), lpFontFile))
+          {
+            pFontGallery->cFontFiles++;
+
+            {
+              ImGuiIO& io = ImGui::GetIO();
+              ZeroMemory(pFontGallery->szBuf, sizeof(pFontGallery->szBuf));
+              ZeroMemory(pFontGallery->szFilepath, sizeof(pFontGallery->szFilepath));
+
+              WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)pFontGallery->szDirectory, pFontGallery->cchDirectory, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath), 0, 0);
+              WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szBuf, _countof(pFontGallery->szBuf), 0, 0);
+              //WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath) - pFontGallery->cchDirectory, 0, 0);
+              strcat_s(pFontGallery->szFilepath, sizeof(pFontGallery->szFilepath), pFontGallery->szBuf);
+
+              static int i = 0;
+              if ((i > 380) && (i < 390))
+              {
+                io.Fonts->AddFontFromFileTTF(pFontGallery->szFilepath, 16.0f);
+              //io.Fonts.get
+                pFontGallery->fApplyThisFrame = FALSE;
+              }
+              ++i;
+            }
+          }
+        }
+      } while (FindNextFile(hFile, &data));
+
+      return TRUE;
+    }
+    return FALSE;
+  }
+
+  static BOOL ShowFontGallery(ImW32FontGallery* pFontGallery)
+  {
+    BOOL fSkipItems = TRUE;
+
+    if (ImGui::Begin("ImW32 FontGallery"))
+    {
+      int cFontFiles;
+      int nCurrentFile;
+      cFontFiles = (int)DPA_GetSize(pFontGallery->hDpaFontFiles);
+      fSkipItems = FALSE;
+      if (ImGui::BeginListBox("##Font ListBox", ImVec2(0.0f, 5 * ImGui::GetFrameHeightWithSpacing())))
+      {
+        fSkipItems = FALSE;
+        for (nCurrentFile = 0; nCurrentFile < pFontGallery->cFontFiles; ++nCurrentFile)
+        {
+          if (ImW32FontFile* lpFontFile = (ImW32FontFile*)DPA_FastGetPtr(pFontGallery->hDpaFontFiles, nCurrentFile))
+          {
+            ZeroMemory(pFontGallery->szBuf, sizeof(pFontGallery->szBuf));
+            ZeroMemory(pFontGallery->szFilepath, sizeof(pFontGallery->szFilepath));
+
+            WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)pFontGallery->szDirectory, pFontGallery->cchDirectory, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath), 0, 0);
+            WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szBuf, _countof(pFontGallery->szBuf), 0, 0);
+            WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath) - pFontGallery->cchDirectory, 0, 0);
+
+            
+            if (ImGui::Selectable(pFontGallery->szBuf, nCurrentFile == pFontGallery->nSelectedFile))
+            {
+              WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)pFontGallery->szDirectory, pFontGallery->cchDirectory, pFontGallery->szFilepath2, _countof(pFontGallery->szFilepath2), 0, 0);
+              WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szBuf2, _countof(pFontGallery->szBuf2), 0, 0);
+            WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath) - pFontGallery->cchDirectory, 0, 0);
+              strcat_s(pFontGallery->szFilepath2, sizeof(pFontGallery->szFilepath2), pFontGallery->szBuf);
+
+              WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szFilepath2 + (pFontGallery->cchDirectory -4), _countof(pFontGallery->szFilepath2) - pFontGallery->cchDirectory, 0, 0);
+              pFontGallery->nSelectedFile = nCurrentFile;
+
+              pFontGallery->fApplyThisFrame = TRUE;
+            }
+          }
+        }
+        ImGui::EndListBox();
+      }
+      pFontGallery->nFontSize = max(1.0f, min(pFontGallery->nFontSize, 192.0f));
+
+      if (ImGui::SliderFloat("Font Size", &pFontGallery->nFontSize, 1.0f, 192.0f))
+      {
+      }
+    }
+
+    ImGui::End();
+
+    return FALSE;
+  }
+
+}
+
 static void Draw(HWND hWnd)
 {
     static ImVec4 clear_color(.0f, .0f, .0f, .0f);
+
     ImGuiIO& io = ImGui::GetIO();
 
     ImGui_ImplOpenGL3_NewFrame();
@@ -338,15 +519,16 @@ static void Draw(HWND hWnd)
     // ImGui Demo
     {
         ImGui::ShowDemoWindow();
+        
     }
 
     // imgui-borderless-win32 Demo
     {
         ImGuiBorderlessWin32::ShowDemoWindow(hWnd, clear_color);
     }
-
+    
     {
-      Test();
+      //ImW32::ShowFontGallery(pFontGallery);
     }
 
     if (wglCheckOcclusion(hWnd))
@@ -370,6 +552,9 @@ static void Draw(HWND hWnd)
 
       SwapBuffers(g_MainWindow.hDC);
     }
+
+
+
 }
 
 static void Hack(HWND hWnd)
@@ -380,6 +565,7 @@ static void Hack(HWND hWnd)
     if (GetCursorPos(&pt))
     {
       SendMessage(hWnd, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y));
+      ReplyMessage(HTTRANSPARENT);
     }
   }
 }
@@ -547,8 +733,7 @@ bool CreateDeviceWGL(HWND hWnd, WGL_WindowData* data)
     ::ReleaseDC(hWnd, hDc);
     data->hDC = GetDC(hWnd);
     if (!g_hRC)
-      //g_hRC = wglCreateContextAttribsARB(data->hDC, nullptr, nullptr);
-      g_hRC = wglCreateContext(data->hDC);
+      g_hRC = wglCreateContextAttribsARB(data->hDC, nullptr, nullptr);
     return true;
 }
 
@@ -596,89 +781,4 @@ static void Hook_Renderer_SwapBuffers(ImGuiViewport* viewport, void*)
     wglSwapIntervalEXT(0);
     ::SwapBuffers(data->hDC);
   }    
-        
-}
-
-static void Test()
-{
-  static float fov = 58.f;
-  static float hdg = 180.0f;
-  static const ImU32 c_green = ImGui::GetColorU32(ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
-
-
-  if (ImGui::Begin("bartest"))
-  {
-    ImGuiWindow* w = ImGui::GetCurrentWindow();
-    const float c_scale = 0.75f;
-    ImRect r = ImRect{ w->Pos, w->Pos + w->Size };
-
-    ImRect rs = ImRect{ r.GetCenter() - (r.GetSize() * 0.5f * c_scale), r.GetCenter() + (r.GetSize() * 0.5f * c_scale) };
-    ImGui::GetWindowDrawList()->AddRect(rs.Min, rs.Max, c_green);
-    ImVec2 s = w->Size;
-
-    static const auto c_centered = [](const char* cstr) -> ImVec2
-      { return ImVec2(-0.5f, -0.5f) * ImGui::CalcTextSize(cstr); };
-
-    static const auto c_radians = [](const float degrees) -> float
-      { return (degrees * 3.1459267f) / 180.0f; };
-
-    // Centered
-    {
-      auto str = std::format("{:2}", hdg);
-      ImVec2 start = w->Pos + ImVec2((0.5f * s.x), 40.0f + (0.5f * s.y));
-      ImGui::GetWindowDrawList()->AddRectFilled(start, start + ImVec2(5.0f, 30.0f), c_green);
-      ImGui::GetWindowDrawList()->AddText(start + ImVec2(2.5f, 2.5f * ImGui::GetFontSize()) + c_centered(str.c_str()), c_green, str.c_str());
-    }
-
-    ImGui::GetWindowDrawList()->PushClipRect(rs.Min, rs.Max);
-    for (int i = 0; i < 72; ++i)
-    {
-      float tick_angle = i * 5.0f;
-      float relative_angle = hdg - tick_angle;
-      float angle_delta = fabsf(relative_angle);
-
-      if (angle_delta < (0.5f * fov))
-      {
-
-        float x_delta;
-
-        {
-          float relative_angle_radians = c_radians(relative_angle);
-          float half_fov_radians = c_radians(0.5f * fov);
-
-          //x_delta = ((0.5f * rs.GetWidth()) * tanf((relative_angle * 3.14159267f) / 180.0f)) / tanf((((0.5f * fov) * 3.14159267f) / 180.0f));
-          x_delta = ((0.5f * rs.GetWidth()) * tanf(relative_angle_radians)) / tanf(half_fov_radians);
-        }
-
-        {
-          auto str = std::format("{:2}", tick_angle);
-          ImVec2 start = rs.Min + ImVec2((0.5f * rs.GetWidth()) + x_delta, 0.5f * rs.GetHeight());
-          ImGui::GetWindowDrawList()->AddRectFilled(start, start + ImVec2(5.0f, 10.0f), c_green);
-          ImGui::GetWindowDrawList()->AddText(start + ImVec2(2.5f, 1.5f * ImGui::GetFontSize()) + c_centered(str.c_str()), c_green, str.c_str());
-        }
-
-        //{
-        //  ImVec2 start = w->Pos + ImVec2((0.5f * s.x) - x_delta, 0.5f * s.y);
-        //  ImGui::GetWindowDrawList()->AddRectFilled(start, start + ImVec2(5.0f, 30.0f), c_green);
-        //}
-      }
-
-    }
-    ImGui::GetWindowDrawList()->PopClipRect();
-  }
-  ImGui::End();
-
-  if (ImGui::Begin("bartestmods"))
-  {
-    ImGuiWindow* w = ImGui::GetCurrentWindow();
-
-    ImVec2 s = w->Size;
-
-    //ImGui::SliderFloat("fov", &fov, 40.0f, 180.0f);
-    ImGui::SliderFloat("fov", &fov, 40.0f, 180.0f);
-    ImGui::SliderFloat("hdg", &hdg, 0.0f, 360.0f);
-
-
-  }
-  ImGui::End();
 }

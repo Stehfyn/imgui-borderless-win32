@@ -180,6 +180,8 @@ SyncFrameChange(
     //bb.fEnable = TRUE;
     //DwmEnableBlurBehindWindow((HWND)hWnd, &bb);
     //DeleteObject(region);
+    static const MARGINS margins[2] = { {0,0,0,0}, {1,1,1,1} };
+    ::DwmExtendFrameIntoClientArea(hWnd, &margins[TRUE]);
     RECT rcWindow;
     GetWindowRect(hWnd, &rcWindow);
     SetWindowPos(hWnd, 0, 0, 0, RECTWIDTH(rcWindow), RECTHEIGHT(rcWindow), dwFlags);
@@ -232,6 +234,9 @@ OnNCActivate(
     UNREFERENCED_PARAMETER(fActive);
     UNREFERENCED_PARAMETER(hwndActDeact);
     UNREFERENCED_PARAMETER(fMinimized);
+
+    const BOOL fEnabled = FALSE;
+    DwmSetWindowAttribute(hWnd, DWMWA_NCRENDERING_POLICY, &fEnabled, sizeof(fEnabled));
     return TRUE;
 }
 
@@ -278,8 +283,8 @@ OnNCCalcSize(
         return WVR_VALIDRECTS;
       }
     }
-
-    return (UINT)FORWARD_WM_NCCALCSIZE(hWnd, fCalcValidRects, lpcsp, DefWindowProc);
+    return 0;
+    //return (UINT)FORWARD_WM_NCCALCSIZE(hWnd, fCalcValidRects, lpcsp, DefWindowProc);
 }
 
 static
@@ -359,8 +364,9 @@ OnCreate(
 {
     UNREFERENCED_PARAMETER(lpCreateStruct);
 
-    SyncFrameChange(hWnd);
-
+    //SyncFrameChange(hWnd);
+    static const MARGINS margins = {-1};
+    ::DwmExtendFrameIntoClientArea(hWnd, &margins);
     FORWARD_WM_CREATE(hWnd, lpCreateStruct, DefWindowProc);
 
     return TRUE;
@@ -374,22 +380,24 @@ OnActivate(
     HWND hwndActDeact,
     BOOL fMinimized)
 {
-    //if (!fMinimized)
-    //{
-    //  HRGN hRgn;
-    //  DWM_BLURBEHIND bb;
-    //  const MARGINS margins = { 1,1,1,1 };
-    //  DwmExtendFrameIntoClientArea(hWnd, &margins);
-    //  bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
-    //  bb.fEnable = TRUE;
-    //  bb.hRgnBlur = hRgn = CreateRectRgn(0, 0, -1, -1);
-    //  DwmEnableBlurBehindWindow(hWnd, &bb);
-    //  DeleteRgn(hRgn);
-    //  SyncFrameChange(hWnd);
-    //}
-    SyncFrameChange(hWnd);
+    if (!fMinimized)
+    {
+      //HRGN hRgn;
+      //DWM_BLURBEHIND bb;
+      //const MARGINS margins = { 1,1,1,1 };
+      //DwmExtendFrameIntoClientArea(hWnd, &margins);
+      //bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+      //bb.fEnable = TRUE;
+      //bb.hRgnBlur = hRgn = CreateRectRgn(0, 0, -1, -1);
+      //DwmEnableBlurBehindWindow(hWnd, &bb);
+      //DeleteRgn(hRgn);
+      const BOOL fEnabled = FALSE;
+      DwmSetWindowAttribute(hWnd, DWMWA_NCRENDERING_POLICY, &fEnabled, sizeof(fEnabled));
+      SyncFrameChange(hWnd);
+    }
+    //SyncFrameChange(hWnd);
 
-    FORWARD_WM_ACTIVATE(hWnd, state, hwndActDeact, fMinimized, DefWindowProc);
+    //FORWARD_WM_ACTIVATE(hWnd, state, hwndActDeact, fMinimized, DefWindowProc);
 }
 
 static
@@ -437,8 +445,9 @@ OnWindowPosChanging(
     HWND        hWnd,
     LPWINDOWPOS lpwpos)
 {
-    lpwpos->flags |= SWP_NOCOPYBITS | SWP_NOREDRAW;
-    return FORWARD_WM_WINDOWPOSCHANGING(hWnd, lpwpos, DefWindowProc);
+    lpwpos->flags |= SWP_NOCOPYBITS | SWP_NOREDRAW | SWP_DEFERERASE | SWP_NOREPOSITION;
+    return 0;
+    //return FORWARD_WM_WINDOWPOSCHANGING(hWnd, lpwpos, DefWindowProc);
 }
 
 static 
@@ -447,7 +456,7 @@ OnWindowPosChanged(
     HWND hWnd, 
     const LPWINDOWPOS lpwpos)
 {
-    FORWARD_WM_WINDOWPOSCHANGED(hWnd, lpwpos, DefWindowProc);
+    //FORWARD_WM_WINDOWPOSCHANGED(hWnd, lpwpos, DefWindowProc);
 }
 
 static 
@@ -461,7 +470,14 @@ OnSysCommand(
     switch (uCmd) {
     case SC_MOVE: {
       PostMessage(hWnd, WM_MOUSEMOVE, 0, MAKELPARAM(0,0));
+      return;
     }
+    case SC_MOUSEMENU:
+    case SC_TASKLIST:
+    case SC_MAXIMIZE:
+    case SC_MINIMIZE:
+    case SC_KEYMENU:
+      return;
     }
     
     FORWARD_WM_SYSCOMMAND(hWnd, uCmd, x, y, DefWindowProc);
@@ -549,7 +565,7 @@ PumpMessageQueue(
     LPMSG msg)
 {
     BOOL done = FALSE;
-    while (PeekMessage(msg, 0, 0, 0, PM_REMOVE))
+    while (PeekMessage(msg, 0, 0, 0, PM_REMOVE | PM_NOYIELD))
     {
         TranslateMessage(msg);
         DispatchMessage(msg);

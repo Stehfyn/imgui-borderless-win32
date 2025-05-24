@@ -13,6 +13,8 @@ typedef void(CALLBACK* DRAWPROC)(HWND hWnd);
            do { AtlThunk_InitData((AtlThunkData_t*)GetWindowLongPtr(hWnd, ThunkOffset), \
                    (void*)(uintptr_t)Proc, (size_t)(uintptr_t)FirstParameter); } while(0)
 
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
 HWND CALLBACK
 CreateBorderlessWindow(
     DWORD dwExStyle,
