@@ -230,13 +230,13 @@ OnNCActivate(
     HWND hwndActDeact,
     BOOL fMinimized)
 {
-    UNREFERENCED_PARAMETER(hWnd);
     UNREFERENCED_PARAMETER(fActive);
     UNREFERENCED_PARAMETER(hwndActDeact);
     UNREFERENCED_PARAMETER(fMinimized);
 
     const BOOL fEnabled = FALSE;
     DwmSetWindowAttribute(hWnd, DWMWA_NCRENDERING_POLICY, &fEnabled, sizeof(fEnabled));
+    FORWARD_WM_NCACTIVATE(hWnd, fActive, hwndActDeact, fMinimized, DefWindowProc);
     return TRUE;
 }
 
@@ -250,6 +250,7 @@ OnNCPaint(
     UNREFERENCED_PARAMETER(hrgn);
 
     ValidateRgn(hwnd, hrgn);
+    FORWARD_WM_NCPAINT(hwnd, hrgn, DefWindowProc);
 }
 
 static 
@@ -472,14 +473,7 @@ OnSysCommand(
       PostMessage(hWnd, WM_MOUSEMOVE, 0, MAKELPARAM(0,0));
       return;
     }
-    case SC_MOUSEMENU:
-    case SC_TASKLIST:
-    case SC_MAXIMIZE:
-    case SC_MINIMIZE:
-    case SC_KEYMENU:
-      return;
     }
-    
     FORWARD_WM_SYSCOMMAND(hWnd, uCmd, x, y, DefWindowProc);
 }
 
@@ -565,6 +559,7 @@ PumpMessageQueue(
     LPMSG msg)
 {
     BOOL done = FALSE;
+    PeekMessage(msg, nullptr, WM_TIMER, WM_TIMER, PM_NOREMOVE);
     while (PeekMessage(msg, 0, 0, 0, PM_REMOVE | PM_NOYIELD))
     {
         TranslateMessage(msg);

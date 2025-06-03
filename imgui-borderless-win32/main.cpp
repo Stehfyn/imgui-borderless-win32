@@ -138,8 +138,8 @@ static void Demo(void*)
 
     // Circumvent CRT Heap Mismatch -- currently leaks handles when a non-primary viewport is merged
     ImGui::SetAllocatorFunctions(
-        [](size_t sz, void*) { return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sz); },
-        [](void* ptr, void*) { (void)ptr; /*HeapFree(GetProcessHeap(), 0, ptr);*/ }, // leak
+        [](size_t sz, void*) { return GlobalAlloc(GPTR, sz); },
+        [](void* ptr, void*) { GlobalFree(ptr); }, // leak
         nullptr);
 
     // Setup Platform/Renderer backends
@@ -174,8 +174,8 @@ static void Demo(void*)
     if (!SetWindowSubclass(hWnd, ImGuiSubclassproc, 0, 0))
       ExitProcess(EXIT_FAILURE);
 
-    //wglSwapIntervalEXT(0);
-    wglSwapIntervalEXT(1);
+    wglSwapIntervalEXT(0);
+    //wglSwapIntervalEXT(1);
 
     while(TRUE)
     {
@@ -322,7 +322,6 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
       break;
     }
     return CallWindowProc(WndProc, hWnd, uMsg, wParam, lParam);
-
     //return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
 
@@ -552,9 +551,6 @@ static void Draw(HWND hWnd)
 
       SwapBuffers(g_MainWindow.hDC);
     }
-
-
-
 }
 
 static void Hack(HWND hWnd)
