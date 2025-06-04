@@ -4,13 +4,13 @@
 #include <dwmapi.h>
 #pragma comment(lib, "atls")
 
-extern "C" { 
+//extern "C" { 
   BOOL EndTask(
       HWND hWnd,
       BOOL fShutDown,
       BOOL fForce
       );
-}
+//}
 
 /****** GDI Macro APIs *******************************************************/
 #define ABS(x)         ((x < 0) ? -x : x)
@@ -172,16 +172,10 @@ VOID CFORCEINLINE CALLBACK
 SyncFrameChange(
     HWND hWnd)
 {
-    const DWORD dwFlags = SWP_SHOWWINDOW | SWP_NOMOVE | SWP_FRAMECHANGED;
-    //HRGN region = ::CreateRectRgn(0, 0, -1, -1);
-    //DWM_BLURBEHIND bb = {};
-    //bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
-    //bb.hRgnBlur = region;
-    //bb.fEnable = TRUE;
-    //DwmEnableBlurBehindWindow((HWND)hWnd, &bb);
-    //DeleteObject(region);
+    const DWORD dwFlags = SWP_SHOWWINDOW | SWP_NOMOVE | SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOZORDER;
+
     static const MARGINS margins[2] = { {0,0,0,0}, {1,1,1,1} };
-    ::DwmExtendFrameIntoClientArea(hWnd, &margins[TRUE]);
+    DwmExtendFrameIntoClientArea(hWnd, &margins[TRUE]);
     RECT rcWindow;
     GetWindowRect(hWnd, &rcWindow);
     SetWindowPos(hWnd, 0, 0, 0, RECTWIDTH(rcWindow), RECTHEIGHT(rcWindow), dwFlags);
@@ -234,8 +228,12 @@ OnNCActivate(
     UNREFERENCED_PARAMETER(hwndActDeact);
     UNREFERENCED_PARAMETER(fMinimized);
 
-    const BOOL fEnabled = FALSE;
-    DwmSetWindowAttribute(hWnd, DWMWA_NCRENDERING_POLICY, &fEnabled, sizeof(fEnabled));
+    BOOL fAllowNcPaint = FALSE;
+    BOOL fDisableTransitions = FALSE;
+    enum DWMNCRENDERINGPOLICY eNcRenderingPolicy = DWMNCRP_DISABLED;
+    DwmSetWindowAttribute(hWnd, DWMWA_ALLOW_NCPAINT, &fAllowNcPaint, sizeof(fAllowNcPaint));
+    DwmSetWindowAttribute(hWnd, DWMWA_TRANSITIONS_FORCEDISABLED, &fDisableTransitions, sizeof(fDisableTransitions));
+    DwmSetWindowAttribute(hWnd, DWMWA_NCRENDERING_POLICY, &eNcRenderingPolicy, sizeof(eNcRenderingPolicy));
     FORWARD_WM_NCACTIVATE(hWnd, fActive, hwndActDeact, fMinimized, DefWindowProc);
     return TRUE;
 }
@@ -280,7 +278,13 @@ OnNCCalcSize(
       }
       else
       {
-        lpcsp->rgrc[0].bottom += 1;
+        lpcsp->rgrc[1] = lpcsp->rgrc[2];
+
+        lpcsp->rgrc[0].top += 6;
+        lpcsp->rgrc[0].bottom -= 6;
+        lpcsp->rgrc[0].left += 6;
+        lpcsp->rgrc[0].right -= 6;
+        
         return WVR_VALIDRECTS;
       }
     }
@@ -365,9 +369,16 @@ OnCreate(
 {
     UNREFERENCED_PARAMETER(lpCreateStruct);
 
-    //SyncFrameChange(hWnd);
-    static const MARGINS margins = {-1};
-    ::DwmExtendFrameIntoClientArea(hWnd, &margins);
+    HRGN region = CreateRectRgn(0, 0, -1, -1);
+    DWM_BLURBEHIND bb = {};
+    bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+    bb.hRgnBlur = region;
+    bb.fEnable = TRUE;
+    DwmEnableBlurBehindWindow((HWND)hWnd, &bb);
+    DeleteObject(region);
+    SyncFrameChange(hWnd);
+    //static const MARGINS margins = {-1};
+    //DwmExtendFrameIntoClientArea(hWnd, &margins);
     FORWARD_WM_CREATE(hWnd, lpCreateStruct, DefWindowProc);
 
     return TRUE;
@@ -398,7 +409,7 @@ OnActivate(
     }
     //SyncFrameChange(hWnd);
 
-    //FORWARD_WM_ACTIVATE(hWnd, state, hwndActDeact, fMinimized, DefWindowProc);
+    FORWARD_WM_ACTIVATE(hWnd, state, hwndActDeact, fMinimized, DefWindowProc);
 }
 
 static
@@ -407,6 +418,7 @@ OnPaint(
     HWND hWnd)
 {
     ValidateRect(hWnd, 0);
+    FORWARD_WM_PAINT(hWnd, DefWindowProc);
 }
 
 static
@@ -559,7 +571,7 @@ PumpMessageQueue(
     LPMSG msg)
 {
     BOOL done = FALSE;
-    PeekMessage(msg, nullptr, WM_TIMER, WM_TIMER, PM_NOREMOVE);
+    PeekMessage(msg, 0, WM_TIMER, WM_TIMER, PM_NOREMOVE);
     while (PeekMessage(msg, 0, 0, 0, PM_REMOVE | PM_NOYIELD))
     {
         TranslateMessage(msg);

@@ -1,3 +1,4 @@
+extern "C"{
 #define WIN32_LEAN_AND_MEAN
 #define IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DISABLE_DEFAULT_ALLOCATORS
@@ -11,20 +12,25 @@
 #include <GL/gl.h>
 #include <GL/wglext.h>
 #include "wglex.h"
-#include <PathCch.h>
-#include <string>
-//#include <dcomp.h>
 #include "dpa_dsa.h"
-#include "imgui.h"
-#include "imgui_internal.h"
-#include "backends/imgui_impl_win32.h"
-#include "backends/imgui_impl_opengl3.h"
+#include "process.h"
 #pragma comment (lib, "shcore")
 #pragma comment (lib, "dwmapi")
 #pragma comment (lib, "opengl32")
 #pragma comment (lib, "glu32")
 #pragma comment (lib, "Comctl32")
 #pragma comment (lib, "Pathcch")
+#pragma comment (lib, "uxtheme")
+}
+#include <PathCch.h>
+#include <string>
+//#include <process.h>
+//#include <dcomp.h>
+#include "imgui.h"
+#include "imgui_internal.h"
+#include "backends/imgui_impl_win32.h"
+#include "backends/imgui_impl_opengl3.h"
+
 //#pragma comment (lib, "dcomp")
 namespace ImGuiBorderlessWin32 {
 static constexpr DWORD windowed   = WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
@@ -76,7 +82,7 @@ static void Hook_Renderer_SwapBuffers(ImGuiViewport* viewport, void*);
 
 static void Draw(HWND hWnd);
 static void Hack(HWND hWnd);
-
+static CRITICAL_SECTION cs = INIT_ONCE_STATIC_INIT;
 static
 LRESULT CALLBACK
 ImGuiSubclassproc(
@@ -100,7 +106,7 @@ static void Demo(void*)
 {
 
     HWND hWnd = CreateBorderlessWindow(0, ImGuiBorderlessWin32::borderless, 1080, 720, Draw);
-
+    InitializeCriticalSection(&cs);
     if (!hWnd)
       ExitProcess(EXIT_FAILURE);
 
@@ -135,11 +141,11 @@ static void Demo(void*)
         style.WindowRounding = 0.0f;
         style.Colors[ImGuiCol_WindowBg].w = 1.0f;
     }
-
+    assert(HeapValidate(GetProcessHeap(), 0, 0));
     // Circumvent CRT Heap Mismatch -- currently leaks handles when a non-primary viewport is merged
     ImGui::SetAllocatorFunctions(
-        [](size_t sz, void*) { return GlobalAlloc(GPTR, sz); },
-        [](void* ptr, void*) { GlobalFree(ptr); }, // leak
+        [](size_t sz, void*) { return HeapAlloc(GetProcessHeap(), 0, sz); },
+        [](void* ptr, void*) { HeapFree(GetProcessHeap(), 0, ptr); }, // leak
         nullptr);
 
     // Setup Platform/Renderer backends
@@ -148,15 +154,15 @@ static void Demo(void*)
     ImGui_ImplWin32_EnableDpiAwareness();
     static ImW32FontGallery* pFontGallery;
     io.FontDefault = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\SegoeUI.ttf", 16.0f);
-    if (!pFontGallery)
-    {
-      pFontGallery = (ImW32FontGallery*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ImW32FontGallery));
-      if (!pFontGallery)
-        ExitProcess(EXIT_FAILURE);
-
-      if (!ImW32::AddFontDirectory(pFontGallery, TEXT("C:\\Windows\\Fonts"), _countof(TEXT("C:\\Windows\\Fonts")) * sizeof(TCHAR)))
-        ExitProcess(EXIT_FAILURE);
-    }
+    //if (!pFontGallery)
+    //{
+    //  pFontGallery = (ImW32FontGallery*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(ImW32FontGallery));
+    //  if (!pFontGallery)
+    //    ExitProcess(EXIT_FAILURE);
+    //
+    //  if (!ImW32::AddFontDirectory(pFontGallery, TEXT("C:\\Windows\\Fonts"), _countof(TEXT("C:\\Windows\\Fonts")) * sizeof(TCHAR)))
+    //    ExitProcess(EXIT_FAILURE);
+    //}
 
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
     {
@@ -174,16 +180,19 @@ static void Demo(void*)
     if (!SetWindowSubclass(hWnd, ImGuiSubclassproc, 0, 0))
       ExitProcess(EXIT_FAILURE);
 
+    MSG msg;
+    if (!PumpMessageQueue(&msg))
+      ExitProcess(EXIT_FAILURE);
+    assert(HeapValidate(GetProcessHeap(), 0, 0));
     wglSwapIntervalEXT(0);
     //wglSwapIntervalEXT(1);
-
+    //SetThemeAppProperties(0);
+    SetWindowTheme(hWnd, L"DWMWindow", L" ");
     while(TRUE)
     {
-        MSG msg;
-
         if (!PumpMessageQueue(&msg))
           break;
-
+        assert(HeapValidate(GetProcessHeap(), 0, 0));
         if (IsIconic(hWnd))
         {
           WaitMessage();
@@ -229,8 +238,8 @@ wWinMain(
     {
         return 1;
     }
-
-    if (HANDLE hThread = CreateThread(0, 0, (LPTHREAD_START_ROUTINE)Demo, 0, 0, 0))
+    unsigned threadID;
+    if (HANDLE hThread = reinterpret_cast<HANDLE>(_beginthreadex(0, 0, reinterpret_cast<_beginthreadex_proc_type>(Demo), 0, 0, &threadID)))
     {
       WaitForSingleObject(hThread, INFINITE);
     }
@@ -256,10 +265,28 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
     if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
       return TRUE;
+    static bool left_sizing = false;
+    static bool right_sizing = false;
 
     switch (uMsg) {
     case WM_DWMNCRENDERINGCHANGED:
       return 0;
+    case WM_SIZING: {
+      switch (wParam) {
+      case WMSZ_BOTTOM:
+      case WMSZ_BOTTOMRIGHT:
+      case WMSZ_RIGHT:
+      {
+        right_sizing = true;
+        left_sizing = false;
+      }
+      default:
+      {
+        left_sizing = true;
+        //right_sizing = false;
+      }
+      }
+    }
     case 0x0313:
       return 0;
     case WM_NCCALCSIZE: {
@@ -267,8 +294,13 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
       {
     case WM_WINDOWPOSCHANGED:
         LRESULT lResult = CallWindowProc(WndProc, hWnd, uMsg, wParam, lParam);
-        DwmFlush();
+        if (!left_sizing)
+          DwmFlush();
+        else
+          wglWaitForVerticalBlank(hWnd);
         Draw(hWnd);
+        if (right_sizing)
+          DwmFlush();
         return lResult;
       }
       break;
@@ -282,7 +314,11 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
     }
     case WM_ENTERMENULOOP:
     case WM_ENTERSIZEMOVE: {
+      left_sizing = false;
+      right_sizing = false;
       SetTimer(hWnd, 1, USER_TIMER_MINIMUM, (TIMERPROC)Draw);
+      //wglSwapIntervalEXT(0);
+      wglSwapIntervalEXT(1);
       return 0;
     }
     case WM_WINDOWPOSCHANGING: {
@@ -291,6 +327,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
       {
         g_Width  = lpwpos->cx;
         g_Height = lpwpos->cy;
+        lpwpos->flags |= SWP_NOCOPYBITS | SWP_NOREDRAW | SWP_NOSENDCHANGING;
       }
 
       return CallWindowProc(WndProc, hWnd, uMsg, wParam, lParam);
@@ -300,20 +337,34 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
       {
         g_Width  = GET_X_LPARAM(lParam);
         g_Height = GET_Y_LPARAM(lParam);
-        //glViewport(0, 0, g_Width, g_Height);
+        glViewport(0, 0, g_Width, g_Height);
       }
       return 0;
     }
     case WM_TIMER: {
-      //wglWaitForVerticalBlank(hWnd);
+      wglWaitForVerticalBlank(hWnd);
+      //glViewport(0, 0, 400, 400);
+      //glScissor(0, 0, 400, 400);
+      if (left_sizing)
+      {
+        //DwmFlush();
+        //DwmFlush();
+      }
       Draw(hWnd);
-      DwmFlush();
+      if (left_sizing)
+      {
+        DwmFlush();
+        //DwmFlush();
+      }
       return 0;
     }
     case WM_EXITMENULOOP:
     case WM_EXITSIZEMOVE: {
       KillTimer(hWnd, 1);
+      left_sizing = false;
+      right_sizing = false;
       Draw(hWnd);
+      wglSwapIntervalEXT(0);
       return 0;
     }
       //return 0;
@@ -338,6 +389,9 @@ ImGuiMultiviewportSubclassproc(
     UNREFERENCED_PARAMETER(dwRefData);
 
     switch (uMsg) {
+    case 0x0090:
+      DestroyWindow(hWnd);
+      return 0;
     case WM_ENTERMENULOOP:
     case WM_ENTERSIZEMOVE: {
       SetTimer(hWnd, 2, USER_TIMER_MINIMUM, (TIMERPROC)Draw);
@@ -468,13 +522,12 @@ namespace ImW32 {
             WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)pFontGallery->szDirectory, pFontGallery->cchDirectory, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath), 0, 0);
             WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szBuf, _countof(pFontGallery->szBuf), 0, 0);
             WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath) - pFontGallery->cchDirectory, 0, 0);
-
             
             if (ImGui::Selectable(pFontGallery->szBuf, nCurrentFile == pFontGallery->nSelectedFile))
             {
               WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)pFontGallery->szDirectory, pFontGallery->cchDirectory, pFontGallery->szFilepath2, _countof(pFontGallery->szFilepath2), 0, 0);
               WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szBuf2, _countof(pFontGallery->szBuf2), 0, 0);
-            WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath) - pFontGallery->cchDirectory, 0, 0);
+              WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szFilepath, _countof(pFontGallery->szFilepath) - pFontGallery->cchDirectory, 0, 0);
               strcat_s(pFontGallery->szFilepath2, sizeof(pFontGallery->szFilepath2), pFontGallery->szBuf);
 
               WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)lpFontFile->szFilename, lpFontFile->cchFilename, pFontGallery->szFilepath2 + (pFontGallery->cchDirectory -4), _countof(pFontGallery->szFilepath2) - pFontGallery->cchDirectory, 0, 0);
@@ -507,9 +560,11 @@ static void Draw(HWND hWnd)
     ImGuiIO& io = ImGui::GetIO();
 
     ImGui_ImplOpenGL3_NewFrame();
+    assert(HeapValidate(GetProcessHeap(), 0, 0));
     ImGui_ImplWin32_NewFrame();
+    assert(HeapValidate(GetProcessHeap(), 0, 0));
     ImGui::NewFrame();
-
+    assert(HeapValidate(GetProcessHeap(), 0, 0));
     // Dockspace
     {
         ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
@@ -518,7 +573,6 @@ static void Draw(HWND hWnd)
     // ImGui Demo
     {
         ImGui::ShowDemoWindow();
-        
     }
 
     // imgui-borderless-win32 Demo
@@ -538,18 +592,22 @@ static void Draw(HWND hWnd)
       glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
       glClear(GL_COLOR_BUFFER_BIT);
       ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
+      assert(HeapValidate(GetProcessHeap(), 0, 0));
       // Update and Render additional Platform Windows
       if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
       {
           ImGui::UpdatePlatformWindows();
+          assert(HeapValidate(GetProcessHeap(), 0, 0));
           ImGui::RenderPlatformWindowsDefault();
-
+          assert(HeapValidate(GetProcessHeap(), 0, 0));
           // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
           wglMakeCurrent(g_MainWindow.hDC, g_hRC);
+          assert(HeapValidate(GetProcessHeap(), 0, 0));
       }
 
+      glAddSwapHintRectWIN(0, 0, 0, 0);
       SwapBuffers(g_MainWindow.hDC);
+      assert(HeapValidate(GetProcessHeap(), 0, 0));
     }
 }
 

@@ -43,6 +43,7 @@ PFNWGLCHOOSEPIXELFORMATARBPROC    __wglChoosePixelFormatARB;
 PFNWGLCREATECONTEXTATTRIBSARBPROC __wglCreateContextAttribsARB;
 PFNWGLMAKECONTEXTCURRENTARBPROC   __wglMakeContextCurrentARB;
 PFNWGLSWAPINTERVALEXTPROC         __wglSwapIntervalEXT;
+MYPFNGLADDSWAPHINTRECTWINPROC         __glAddSwapHintRectWIN;
 #define D3DKMT_PTR(Type, Name) Type Name
 typedef LONG NTSTATUS;
 typedef UINT D3DKMT_HANDLE;
@@ -184,10 +185,11 @@ wglGetPixelFormat(
                 __wglCreateContextAttribsARB = (PFNWGLCREATECONTEXTATTRIBSARBPROC)__wglGetProcAddress("wglCreateContextAttribsARB");
                 __wglMakeContextCurrentARB   = (PFNWGLMAKECONTEXTCURRENTARBPROC)__wglGetProcAddress("wglMakeContextCurrentARB");
                 __wglSwapIntervalEXT         = (PFNWGLSWAPINTERVALEXTPROC)__wglGetProcAddress("wglSwapIntervalEXT");
-
+                __glAddSwapHintRectWIN       = (MYPFNGLADDSWAPHINTRECTWINPROC)__wglGetProcAddress("glAddSwapHintRectWIN");
                 if ((!__wglChoosePixelFormatARB)    ||
                     (!__wglCreateContextAttribsARB) ||
                     (!__wglMakeContextCurrentARB)   ||
+                    (!__glAddSwapHintRectWIN)       ||
                     (!__wglSwapIntervalEXT))
                 {
                   return NULL;

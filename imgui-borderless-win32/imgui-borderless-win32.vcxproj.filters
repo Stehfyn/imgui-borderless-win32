@@ -86,10 +86,10 @@
     <ClCompile Include="imgui\backends\imgui_impl_opengl2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="BorderlessWindow.cpp">
+    <ClCompile Include="BorderlessWindow.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="wglex.cpp">
+    <ClCompile Include="wglex.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
