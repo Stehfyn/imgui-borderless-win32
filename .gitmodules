@@ -2,3 +2,9 @@
 	path = imgui-borderless-win32/imgui
 	url = https://github.com/ocornut/imgui
 	branch = docking
+[submodule "imgui-borderless-win32/implot"]
+	path = imgui-borderless-win32/implot
+	url = https://github.com/epezent/implot
+[submodule "imgui-borderless-win32/implot3d"]
+	path = imgui-borderless-win32/implot3d
+	url = https://github.com/brenocq/implot3d

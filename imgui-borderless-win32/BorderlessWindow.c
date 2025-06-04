@@ -279,11 +279,11 @@ OnNCCalcSize(
       else
       {
         lpcsp->rgrc[1] = lpcsp->rgrc[2];
-
-        lpcsp->rgrc[0].top += 6;
-        lpcsp->rgrc[0].bottom -= 6;
-        lpcsp->rgrc[0].left += 6;
-        lpcsp->rgrc[0].right -= 6;
+        lpcsp->rgrc[0].bottom -= 12;
+        //lpcsp->rgrc[0].top += 6;
+        //lpcsp->rgrc[0].bottom -= 6;
+        //lpcsp->rgrc[0].left += 6;
+        //lpcsp->rgrc[0].right -= 6;
         
         return WVR_VALIDRECTS;
       }
@@ -370,7 +370,7 @@ OnCreate(
     UNREFERENCED_PARAMETER(lpCreateStruct);
 
     HRGN region = CreateRectRgn(0, 0, -1, -1);
-    DWM_BLURBEHIND bb = {};
+    DWM_BLURBEHIND bb = {0};
     bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
     bb.hRgnBlur = region;
     bb.fEnable = TRUE;

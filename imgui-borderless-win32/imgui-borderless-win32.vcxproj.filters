@@ -57,6 +57,18 @@
     <ClInclude Include="wglex.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="implot\implot.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="implot\implot_internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="implot3d\implot3d.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="implot3d\implot3d_internal.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="imgui\imgui.cpp">
@@ -90,6 +102,27 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="wglex.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="implot\implot.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="implot\implot_demo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="implot\implot_items.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="implot3d\implot3d.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="implot3d\implot3d_demo.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="implot3d\implot3d_items.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="implot3d\implot3d_meshes.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

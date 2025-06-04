@@ -24,12 +24,14 @@ extern "C"{
 }
 #include <PathCch.h>
 #include <string>
-//#include <process.h>
-//#include <dcomp.h>
+
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_opengl3.h"
+
+#include "implot/implot.h"
+#include "implot3d/implot3d.h"
 
 //#pragma comment (lib, "dcomp")
 namespace ImGuiBorderlessWin32 {
@@ -126,6 +128,8 @@ static void Demo(void*)
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImPlot::CreateContext();
+    ImPlot3D::CreateContext();
     ImGui::StyleColorsDark();
 
     ImGuiIO&    io    = ImGui::GetIO();
@@ -141,7 +145,6 @@ static void Demo(void*)
         style.WindowRounding = 0.0f;
         style.Colors[ImGuiCol_WindowBg].w = 1.0f;
     }
-    assert(HeapValidate(GetProcessHeap(), 0, 0));
     // Circumvent CRT Heap Mismatch -- currently leaks handles when a non-primary viewport is merged
     ImGui::SetAllocatorFunctions(
         [](size_t sz, void*) { return HeapAlloc(GetProcessHeap(), 0, sz); },
@@ -183,7 +186,6 @@ static void Demo(void*)
     MSG msg;
     if (!PumpMessageQueue(&msg))
       ExitProcess(EXIT_FAILURE);
-    assert(HeapValidate(GetProcessHeap(), 0, 0));
     wglSwapIntervalEXT(0);
     //wglSwapIntervalEXT(1);
     //SetThemeAppProperties(0);
@@ -192,7 +194,7 @@ static void Demo(void*)
     {
         if (!PumpMessageQueue(&msg))
           break;
-        assert(HeapValidate(GetProcessHeap(), 0, 0));
+
         if (IsIconic(hWnd))
         {
           WaitMessage();
@@ -279,11 +281,11 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
       {
         right_sizing = true;
         left_sizing = false;
+        break;
       }
       default:
       {
         left_sizing = true;
-        //right_sizing = false;
       }
       }
     }
@@ -560,11 +562,8 @@ static void Draw(HWND hWnd)
     ImGuiIO& io = ImGui::GetIO();
 
     ImGui_ImplOpenGL3_NewFrame();
-    assert(HeapValidate(GetProcessHeap(), 0, 0));
     ImGui_ImplWin32_NewFrame();
-    assert(HeapValidate(GetProcessHeap(), 0, 0));
     ImGui::NewFrame();
-    assert(HeapValidate(GetProcessHeap(), 0, 0));
     // Dockspace
     {
         ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
@@ -573,6 +572,8 @@ static void Draw(HWND hWnd)
     // ImGui Demo
     {
         ImGui::ShowDemoWindow();
+        ImPlot::ShowDemoWindow();
+        ImPlot3D::ShowDemoWindow();
     }
 
     // imgui-borderless-win32 Demo
@@ -592,22 +593,17 @@ static void Draw(HWND hWnd)
       glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
       glClear(GL_COLOR_BUFFER_BIT);
       ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-      assert(HeapValidate(GetProcessHeap(), 0, 0));
       // Update and Render additional Platform Windows
       if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
       {
           ImGui::UpdatePlatformWindows();
-          assert(HeapValidate(GetProcessHeap(), 0, 0));
           ImGui::RenderPlatformWindowsDefault();
-          assert(HeapValidate(GetProcessHeap(), 0, 0));
           // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
           wglMakeCurrent(g_MainWindow.hDC, g_hRC);
-          assert(HeapValidate(GetProcessHeap(), 0, 0));
       }
 
       glAddSwapHintRectWIN(0, 0, 0, 0);
       SwapBuffers(g_MainWindow.hDC);
-      assert(HeapValidate(GetProcessHeap(), 0, 0));
     }
 }
 

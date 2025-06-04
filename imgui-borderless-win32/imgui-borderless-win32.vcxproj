@@ -77,10 +77,10 @@
     <IncludePath>$(ProjectDir)\imgui;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(ProjectDir)\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)\imgui;$(ProjectDir)\implot;$(ProjectDir)\implot3d;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(ProjectDir)\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)\imgui;$(ProjectDir)\implot;$(ProjectDir)\implot3d;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -161,6 +161,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="implot3d\implot3d.h" />
+    <ClInclude Include="implot3d\implot3d_internal.h" />
+    <ClInclude Include="implot\implot.h" />
+    <ClInclude Include="implot\implot_internal.h" />
     <ClInclude Include="wglex.h" />
     <ClInclude Include="imgui\backends\imgui_impl_opengl2.h" />
     <ClInclude Include="imgui\backends\imgui_impl_opengl3.h" />
@@ -185,6 +189,13 @@
     <ClCompile Include="imgui\imgui_draw.cpp" />
     <ClCompile Include="imgui\imgui_tables.cpp" />
     <ClCompile Include="imgui\imgui_widgets.cpp" />
+    <ClCompile Include="implot3d\implot3d.cpp" />
+    <ClCompile Include="implot3d\implot3d_demo.cpp" />
+    <ClCompile Include="implot3d\implot3d_items.cpp" />
+    <ClCompile Include="implot3d\implot3d_meshes.cpp" />
+    <ClCompile Include="implot\implot.cpp" />
+    <ClCompile Include="implot\implot_demo.cpp" />
+    <ClCompile Include="implot\implot_items.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="BorderlessWindow.c" />
     <ClCompile Include="wglex.c" />
