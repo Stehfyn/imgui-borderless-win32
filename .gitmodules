@@ -2,3 +2,6 @@
 	path = imgui-borderless-win32/imgui
 	url = https://github.com/ocornut/imgui
 	branch = docking
+[submodule "external/dear_bindings"]
+	path = external/dear_bindings
+	url = https://github.com/dearimgui/dear_bindings.git

@@ -10,3 +10,5 @@ x64/
 
 # ffmpeg Headers and Static Binaries
 **/ffmpeg
+
+dcimgui2
