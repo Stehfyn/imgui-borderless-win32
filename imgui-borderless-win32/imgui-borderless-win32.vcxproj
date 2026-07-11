@@ -71,22 +71,22 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <IncludePath>$(SolutionDir);$(SolutionDir)dcimgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)generated\dear_bindings;$(ProjectDir)generated\dear_bindings\backends;$(ProjectDir)imgui;$(ProjectDir)imgui\backends;$(SolutionDir);$(IncludePath)</IncludePath>
     <LibraryPath>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);</LibraryPath>
     <ReferencePath>$(SolutionDir)$(Platform)\$(Configuration);$(VC_ReferencesPath_x86);</ReferencePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <IncludePath>$(SolutionDir);$(SolutionDir)dcimgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)generated\dear_bindings;$(ProjectDir)generated\dear_bindings\backends;$(ProjectDir)imgui;$(ProjectDir)imgui\backends;$(SolutionDir);$(IncludePath)</IncludePath>
     <LibraryPath>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);</LibraryPath>
     <ReferencePath>$(SolutionDir)$(Platform)\$(Configuration);$(VC_ReferencesPath_x86);</ReferencePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(SolutionDir);$(SolutionDir)dcimgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)generated\dear_bindings;$(ProjectDir)generated\dear_bindings\backends;$(ProjectDir)imgui;$(ProjectDir)imgui\backends;$(SolutionDir);$(IncludePath)</IncludePath>
     <LibraryPath>$(SolutionDir)$(Platform)/$(Configuration);$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64);</LibraryPath>
     <ReferencePath>$(SolutionDir)$(Platform)\$(Configuration);$(VC_ReferencesPath_x64);</ReferencePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(SolutionDir);$(SolutionDir)dcimgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)generated\dear_bindings;$(ProjectDir)generated\dear_bindings\backends;$(ProjectDir)imgui;$(ProjectDir)imgui\backends;$(SolutionDir);$(IncludePath)</IncludePath>
     <LibraryPath>$(SolutionDir)$(Platform)/$(Configuration);$(VC_LibraryPath_x64);$(WindowsSDK_LibraryPath_x64);</LibraryPath>
     <ReferencePath>$(SolutionDir)$(Platform)\$(Configuration);$(VC_ReferencesPath_x64);</ReferencePath>
   </PropertyGroup>
@@ -105,7 +105,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)x64\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dcimgui.lib;$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
@@ -130,7 +130,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)x64\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dcimgui.lib;$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
@@ -150,7 +150,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)x64\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dcimgui.lib;$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
@@ -174,7 +174,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(SolutionDir)x64\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>dcimgui.lib;$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(CoreLibraryDependencies);%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
@@ -183,15 +183,29 @@
   <ItemGroup>
     <ClInclude Include="swcadef.h" />
     <ClInclude Include="oglwindow.h" />
+    <ClInclude Include="generated\dear_bindings\dcimgui.h" />
+    <ClInclude Include="generated\dear_bindings\dcimgui_internal.h" />
+    <ClInclude Include="generated\dear_bindings\backends\dcimgui_impl_opengl3.h" />
+    <ClInclude Include="generated\dear_bindings\backends\dcimgui_impl_win32.h" />
+    <ClInclude Include="imgui\imgui.h" />
+    <ClInclude Include="imgui\imgui_internal.h" />
+    <ClInclude Include="imgui\backends\imgui_impl_opengl3.h" />
+    <ClInclude Include="imgui\backends\imgui_impl_win32.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.c" />
     <ClCompile Include="oglwindow.c" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\dcimgui\dcimgui.vcxproj">
-      <Project>{cf8e7fa2-2ca5-438c-bc3c-dd8f8474e2f3}</Project>
-    </ProjectReference>
+    <ClCompile Include="generated\dear_bindings\dcimgui.cpp" />
+    <ClCompile Include="generated\dear_bindings\dcimgui_internal.cpp" />
+    <ClCompile Include="generated\dear_bindings\backends\dcimgui_impl_opengl3.cpp" />
+    <ClCompile Include="generated\dear_bindings\backends\dcimgui_impl_win32.cpp" />
+    <ClCompile Include="imgui\imgui.cpp" />
+    <ClCompile Include="imgui\imgui_demo.cpp" />
+    <ClCompile Include="imgui\imgui_draw.cpp" />
+    <ClCompile Include="imgui\imgui_tables.cpp" />
+    <ClCompile Include="imgui\imgui_widgets.cpp" />
+    <ClCompile Include="imgui\backends\imgui_impl_opengl3.cpp" />
+    <ClCompile Include="imgui\backends\imgui_impl_win32.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

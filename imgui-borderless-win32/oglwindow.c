@@ -3,7 +3,6 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <GL/gl.h>
-#include <gl/wglext.h>
 
 #pragma comment (lib, "dwmapi")
 #pragma comment(lib, "ntdll")
@@ -47,7 +46,7 @@ typedef BOOL(WINAPI* PFNWGLSWAPINTERVALEXTPROC) (int interval);
 typedef BOOL(WINAPI* PFNWGLCHOOSEPIXELFORMATARBPROC)(HDC, const int*, const FLOAT*, UINT, int*, UINT*);
 typedef HPBUFFERARB(WINAPI* PFNWGLCREATEPBUFFERARBPROC)(HDC, int, int, int, const int*);
 typedef HDC(WINAPI* PFNWGLGETPBUFFERDCARBPROC)(HPBUFFERARB);
-typedef BOOL(WINAPI* PFNWGLRELEASEPBUFFERDCARBPROC)(HPBUFFERARB, HDC);
+typedef int(WINAPI* PFNWGLRELEASEPBUFFERDCARBPROC)(HPBUFFERARB, HDC);
 typedef BOOL(WINAPI* PFNWGLDESTROYPBUFFERARBPROC)(HPBUFFERARB);
 typedef BOOL(WINAPI* PFNWGLQUERYPBUFFERARBPROC)(HPBUFFERARB, int, int*);
 typedef BOOL(WINAPI* PFNWGLBINDTEXIMAGEARBPROC)(HPBUFFERARB, int);
@@ -56,11 +55,26 @@ PFNWGLSWAPINTERVALEXTPROC      wglSwapIntervalEXT;
 PFNWGLCHOOSEPIXELFORMATARBPROC wglChoosePixelFormatARB;
 PFNWGLCREATEPBUFFERARBPROC     wglCreatePbufferARB;
 PFNWGLGETPBUFFERDCARBPROC      wglGetPbufferDCARB;
+PFNWGLRELEASEPBUFFERDCARBPROC  wglReleasePbufferDCARB;
 PFNWGLDESTROYPBUFFERARBPROC    wglDestroyPbufferARB;
 PFNWGLBINDTEXIMAGEARBPROC      wglBindTexImageARB;
 PFNWGLRELEASETEXIMAGEARBPROC   wglReleaseTexImageARB;
 #define GL_BGR                 (0x80E0)
 #define GL_BGRA                (0x80E1)
+#define OGLWINDOW_SURFACE_WIDTH  2560
+#define OGLWINDOW_SURFACE_HEIGHT 1600
+
+static DWM_TIMING_INFO g_DwmTiming = { sizeof(DWM_TIMING_INFO) };
+static LONGLONG        g_LastPresentTicks;
+static LONGLONG        g_LastResizeRenderTicks;
+static UINT            g_SizingEdge;
+static HWND            g_WindowPosChangedHwnd;
+static HWND            g_SynchronousResizeHwnd;
+static LONG            g_SynchronousResizeRenderDepth;
+static HWND            g_PaintHwnd;
+static HDC             g_PaintHdc;
+static BOOL            g_PaintPresented;
+
 /****** Private API **********************************************************/
 
 static 
@@ -80,6 +94,13 @@ BOOL PFORCEINLINE APIPRIVATE
 CreateSurface(
     HDC dc,
     WGLSURFACE* pwglSurf
+    );
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+PresentSurfaceToDC(
+    HWND hWnd,
+    HDC  hdc
     );
 
 static 
@@ -120,9 +141,41 @@ OGLWindow_OnPaint(
 
 static
 VOID PFORCEINLINE CALLBACK
+OGLWindow_OnPrintClient(
+    HWND hWnd,
+    HDC  hDC,
+    UINT options
+    );
+
+static
+VOID PFORCEINLINE CALLBACK
 OGLWindow_OnWindowPosChanged(
     HWND              hWnd,
     const LPWINDOWPOS lpwpos
+    );
+
+static
+VOID PFORCEINLINE CALLBACK
+OGLWindow_OnSize(
+    HWND hWnd,
+    UINT state,
+    int  cx,
+    int  cy
+    );
+
+static
+BOOL PFORCEINLINE CALLBACK
+OGLWindow_OnSizing(
+    HWND  hWnd,
+    UINT  edge,
+    RECT* prc
+    );
+
+static
+VOID PFORCEINLINE CALLBACK
+OGLWindow_OnWindowPosChanging(
+    HWND        hWnd,
+    LPWINDOWPOS lpwpos
     );
 
 static
@@ -182,6 +235,31 @@ OGLWindow_OnExitSizeMove(
     );
 
 static
+BOOL PFORCEINLINE APIPRIVATE
+IsOriginMovingSizingEdge(
+    UINT edge
+    );
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+IsSecondaryViewportWindow(
+    HWND hWnd
+    );
+
+static
+VOID PFORCEINLINE APIPRIVATE
+FlushIfOriginMovingResize(
+    VOID
+    );
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+SwitchToRenderFiber(
+    HWND hWnd,
+    BOOL synchronous_resize
+    );
+
+static
 VOID PFORCEINLINE CALLBACK
 OGLWindow_OnTimer(
     HWND hWnd,
@@ -190,38 +268,39 @@ OGLWindow_OnTimer(
 
 /****** Private API Implementation *******************************************/
 
-static 
-ATOM PFORCEINLINE APIPRIVATE
-RegisterOGLWindowClass(
-    VOID)
-{
-    WNDCLASSEX wcx = { sizeof(wcx) };
-
-    wcx.style         = CS_OWNDC | CS_BYTEALIGNCLIENT | CS_BYTEALIGNWINDOW;
-    wcx.lpfnWndProc   = DefOGLWindowProc;
-    wcx.hInstance     = GetModuleHandle(NULL);
-    wcx.cbWndExtra    = sizeof(void*);
-    wcx.hCursor       = LoadCursor(0, IDC_ARROW);
-    wcx.hbrBackground = GetStockBrush(BLACK_BRUSH);
-    wcx.lpszMenuName  = NULL;
-    wcx.lpszClassName = OGLWINDOW_CLASS;
-
-    return RegisterClassEx(&wcx);
-}
-
 static
 BOOL PFORCEINLINE APIPRIVATE
 InitWGL(
     VOID)
 {
+    static BOOL pbuff_class_registered;
     WNDCLASSEX wcx = { sizeof(wcx) };
+    HWND hwnd;
+    HDC dc;
+    int pf;
+    HGLRC hrc;
+
     wcx.lpfnWndProc = DefWindowProc;
     wcx.hInstance = GetModuleHandle(NULL);
     wcx.lpszClassName = TEXT("pbuff");
-    LPTSTR szClassAtom = MAKEINTATOM(RegisterClassEx(&wcx));
-    HWND hwnd = CreateWindow(szClassAtom, TEXT("pb"), WS_OVERLAPPEDWINDOW,
-    100, 100, 100, 100, 0, 0, wcx.hInstance, 0);
-    HDC dc = GetDC(hwnd);
+
+    if (!pbuff_class_registered)
+    {
+      if (!RegisterClassEx(&wcx) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        return FALSE;
+      pbuff_class_registered = TRUE;
+    }
+
+    hwnd = CreateWindow(wcx.lpszClassName, TEXT("pb"), WS_OVERLAPPEDWINDOW, 100, 100, 100, 100, 0, 0, wcx.hInstance, 0);
+    if (!hwnd)
+      return FALSE;
+
+    dc = GetDC(hwnd);
+    if (!dc)
+    {
+      DestroyWindow(hwnd);
+      return FALSE;
+    }
 
     PIXELFORMATDESCRIPTOR pfd = { sizeof(pfd) };
     pfd.nVersion = 1;
@@ -229,21 +308,41 @@ InitWGL(
     pfd.iPixelType = PFD_TYPE_RGBA;
     pfd.cColorBits = 24;
 
-    int pf = ChoosePixelFormat(dc, &pfd);
-    SetPixelFormat(dc, pf, &pfd);
+    pf = ChoosePixelFormat(dc, &pfd);
+    if (!pf || !SetPixelFormat(dc, pf, &pfd))
+    {
+      ReleaseDC(hwnd, dc);
+      DestroyWindow(hwnd);
+      return FALSE;
+    }
 
-    HGLRC hrc = wglCreateContext(dc);
+    hrc = wglCreateContext(dc);
+    if (!hrc)
+    {
+      ReleaseDC(hwnd, dc);
+      DestroyWindow(hwnd);
+      return FALSE;
+    }
     wglMakeCurrent(dc, hrc);
     wglSwapIntervalEXT = (void*)wglGetProcAddress("wglSwapIntervalEXT");
     wglChoosePixelFormatARB = (void*)wglGetProcAddress("wglChoosePixelFormatARB");
     wglCreatePbufferARB = (void*)wglGetProcAddress("wglCreatePbufferARB");
     wglGetPbufferDCARB = (void*)wglGetProcAddress("wglGetPbufferDCARB");
+    wglReleasePbufferDCARB = (void*)wglGetProcAddress("wglReleasePbufferDCARB");
     wglDestroyPbufferARB = (void*)wglGetProcAddress("wglDestroyPbufferARB");
     wglBindTexImageARB = (void*)wglGetProcAddress("wglBindTexImageARB");
     wglReleaseTexImageARB = (void*)wglGetProcAddress("wglReleaseTexImageARB");
     wglMakeCurrent(0, 0);
     wglDeleteContext(hrc);
     ReleaseDC(hwnd, dc);
+
+    DestroyWindow(hwnd);
+
+    return wglChoosePixelFormatARB &&
+           wglCreatePbufferARB &&
+           wglGetPbufferDCARB &&
+           wglReleasePbufferDCARB &&
+           wglDestroyPbufferARB;
 }
 
 static
@@ -264,8 +363,9 @@ CreateSurface(
     };
 
     int formats[1];
-    UINT count;
-    wglChoosePixelFormatARB(dc, iattribs, NULL, 1, formats, &count);
+    UINT count = 0;
+    if (!wglChoosePixelFormatARB(dc, iattribs, NULL, 1, formats, &count) || count == 0)
+      return FALSE;
 
     // create pbuffer
     int pattribs[] = {
@@ -274,14 +374,148 @@ CreateSurface(
         0
     };
 
-    pwglSurf->hpb = wglCreatePbufferARB(dc, formats[0], 2560,1600, pattribs);
+    pwglSurf->width = OGLWINDOW_SURFACE_WIDTH;
+    pwglSurf->height = OGLWINDOW_SURFACE_HEIGHT;
+    pwglSurf->hpb = wglCreatePbufferARB(dc, formats[0], pwglSurf->width, pwglSurf->height, pattribs);
+    if (!pwglSurf->hpb)
+      return FALSE;
+
     pwglSurf->pbdc = wglGetPbufferDCARB(pwglSurf->hpb);
+    if (!pwglSurf->pbdc)
+      return FALSE;
+
     pwglSurf->pbrc = wglCreateContext(pwglSurf->pbdc);
+    if (!pwglSurf->pbrc)
+      return FALSE;
+
     wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
-    wglBindTexImageARB(pwglSurf->pbdc, WGL_FRONT_LEFT_ARB);
     //glReadBuffer(GL_FRONT);
     
     //glPixelStorei(GL_PACK_ALIGNMENT, 4);
+
+    return TRUE;
+}
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+PresentSurfaceToDC(
+    HWND hWnd,
+    HDC  hdc)
+{
+    RECT rc;
+    SIZE sz;
+    SIZE_T pixel_count;
+    LARGE_INTEGER qpc_start;
+    LARGE_INTEGER qpc_end;
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+
+    if (!pwglSurf || !hdc)
+      return FALSE;
+
+    GetClientRect(hWnd, &rc);
+    sz.cx = RECTWIDTH(rc);
+    sz.cy = RECTHEIGHT(rc);
+    if (sz.cx <= 0 || sz.cy <= 0)
+      return FALSE;
+
+    sz.cx = CLAMP(sz.cx, 1, pwglSurf->width);
+    sz.cy = CLAMP(sz.cy, 1, pwglSurf->height);
+    pixel_count = (SIZE_T)sz.cx * (SIZE_T)sz.cy * 4u;
+    if (pixel_count > pwglSurf->pixels_capacity)
+    {
+      BYTE* next_pixels = pwglSurf->pixels
+        ? (BYTE*)HeapReAlloc(GetProcessHeap(), 0, pwglSurf->pixels, pixel_count)
+        : (BYTE*)HeapAlloc(GetProcessHeap(), 0, pixel_count);
+      if (!next_pixels)
+        return FALSE;
+
+      pwglSurf->pixels = next_pixels;
+      pwglSurf->pixels_capacity = pixel_count;
+    }
+
+    if (!wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc))
+      return FALSE;
+
+    QueryPerformanceCounter(&qpc_start);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glReadPixels(0, 0, sz.cx, sz.cy, GL_BGRA, GL_UNSIGNED_BYTE, pwglSurf->pixels);
+    SetStretchBltMode(hdc, COLORONCOLOR);
+
+    {
+      BITMAPINFOHEADER bmih = { sizeof(bmih), sz.cx, sz.cy, 1, 32, BI_RGB };
+      StretchDIBits(hdc, 0, 0, RECTWIDTH(rc), RECTHEIGHT(rc), 0, 0, sz.cx, sz.cy, pwglSurf->pixels, (const BITMAPINFO*)&bmih, DIB_RGB_COLORS, SRCCOPY);
+    }
+    GdiFlush();
+    QueryPerformanceCounter(&qpc_end);
+    g_LastPresentTicks = qpc_end.QuadPart - qpc_start.QuadPart;
+
+    return TRUE;
+}
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+IsOriginMovingSizingEdge(
+    UINT edge)
+{
+    return edge == WMSZ_LEFT       ||
+           edge == WMSZ_TOP        ||
+           edge == WMSZ_TOPLEFT    ||
+           edge == WMSZ_TOPRIGHT   ||
+           edge == WMSZ_BOTTOMLEFT;
+}
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+IsSecondaryViewportWindow(
+    HWND hWnd)
+{
+    return GetPropA(hWnd, OGLWINDOW_SECONDARY_VIEWPORT_PROP) != NULL;
+}
+
+static
+VOID PFORCEINLINE APIPRIVATE
+FlushIfOriginMovingResize(
+    VOID)
+{
+    if (!IsOriginMovingSizingEdge(g_SizingEdge))
+      return;
+
+    DwmFlush();
+}
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+SwitchToRenderFiber(
+    HWND hWnd,
+    BOOL synchronous_resize)
+{
+    LPVOID fiber = (LPVOID)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+    LARGE_INTEGER qpc_start;
+    LARGE_INTEGER qpc_end;
+    HWND previous_resize_hwnd;
+
+    if (!fiber || fiber == GetCurrentFiber())
+      return FALSE;
+
+    if (synchronous_resize)
+    {
+      QueryPerformanceCounter(&qpc_start);
+      previous_resize_hwnd = g_SynchronousResizeHwnd;
+      g_SynchronousResizeHwnd = hWnd;
+      g_SynchronousResizeRenderDepth++;
+    }
+
+    SwitchToFiber(fiber);
+
+    if (synchronous_resize)
+    {
+      QueryPerformanceCounter(&qpc_end);
+      g_LastResizeRenderTicks = qpc_end.QuadPart - qpc_start.QuadPart;
+      g_SynchronousResizeRenderDepth--;
+      g_SynchronousResizeHwnd = previous_resize_hwnd;
+    }
+
+    return TRUE;
 }
 
 static 
@@ -344,9 +578,33 @@ VOID PFORCEINLINE CALLBACK
 OGLWindow_OnDestroy(
     HWND hWnd)
 {
-    UNREFERENCED_PARAMETER(hWnd);
+    BOOL post_quit = (GetPropA(hWnd, OGLWINDOW_NO_QUIT_ON_DESTROY_PROP) == NULL);
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
 
-    PostQuitMessage(EXIT_SUCCESS);
+    RemovePropA(hWnd, OGLWINDOW_NO_QUIT_ON_DESTROY_PROP);
+
+    if (pwglSurf)
+    {
+      if (pwglSurf->pbdc && pwglSurf->pbrc)
+        wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
+      if (pwglSurf->hpb && wglReleaseTexImageARB)
+        wglReleaseTexImageARB(pwglSurf->hpb, WGL_FRONT_LEFT_ARB);
+      if (wglGetCurrentContext() == pwglSurf->pbrc)
+        wglMakeCurrent(NULL, NULL);
+      if (pwglSurf->pbrc)
+        wglDeleteContext(pwglSurf->pbrc);
+      if (pwglSurf->hpb && pwglSurf->pbdc && wglReleasePbufferDCARB)
+        wglReleasePbufferDCARB(pwglSurf->hpb, pwglSurf->pbdc);
+      if (pwglSurf->hpb && wglDestroyPbufferARB)
+        wglDestroyPbufferARB(pwglSurf->hpb);
+      if (pwglSurf->pixels)
+        HeapFree(GetProcessHeap(), 0, pwglSurf->pixels);
+      SetWindowLongPtr(hWnd, 0, 0);
+      HeapFree(GetProcessHeap(), 0, pwglSurf);
+    }
+
+    if (post_quit)
+      PostQuitMessage(EXIT_SUCCESS);
 }
 
 static
@@ -354,22 +612,44 @@ VOID PFORCEINLINE CALLBACK
 OGLWindow_OnPaint(
     HWND hWnd)
 {
-    RECT rc;
     PAINTSTRUCT ps;
-    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
     HDC hdc = BeginPaint(hWnd, &ps);
-    GetClientRect(hWnd, &rc);
-    //SIZE sz = { RECTWIDTH(ps.rcPaint), RECTHEIGHT(ps.rcPaint) };
-    SIZE sz = { RECTWIDTH(rc), RECTHEIGHT(rc) };
-    //wglReleaseTexImageARB(pwglSurf->pbdc, WGL_FRONT_LEFT_ARB);
-    //(void) BitBlt(hdc, 0, 0, sz.cx, sz.cy, pwglSurf->pbdc, 0, 0, SRCCOPY|CAPTUREBLT);
-    //StretchBlt(hdc, 0, 0, sz.cx, sz.cy, pwglSurf->pbdc, 0, 0, 256, 256, SRCCOPY);
-    //wglBindTexImageARB(pwglSurf->pbdc, WGL_FRONT_LEFT_ARB);
-    BITMAPINFOHEADER bmih = { sizeof(bmih), sz.cx, sz.cy, 1, 32, BI_RGB };
-    static BYTE pixels[2560 * 1600 * 4] = { 0 };
-    glReadPixels(0, 0, sz.cx, sz.cy, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
-    StretchDIBits(hdc, 0, 0, sz.cx, sz.cy, 0, 0, sz.cx, sz.cy, pixels, (const BITMAPINFO*)&bmih, DIB_RGB_COLORS, SRCCOPY);
+    if (IsSecondaryViewportWindow(hWnd))
+    {
+      HWND previous_paint_hwnd = g_PaintHwnd;
+      HDC previous_paint_hdc = g_PaintHdc;
+      BOOL previous_paint_presented = g_PaintPresented;
+
+      g_PaintHwnd = hWnd;
+      g_PaintHdc = hdc;
+      g_PaintPresented = FALSE;
+
+      BOOL is_modal_sizing = IsOGLWindowInModalSizeMove(hWnd);
+      (void)SwitchToRenderFiber(hWnd, is_modal_sizing);
+      if (!g_PaintPresented && !is_modal_sizing)
+        PresentSurfaceToDC(hWnd, hdc);
+      FlushIfOriginMovingResize();
+
+      g_PaintHwnd = previous_paint_hwnd;
+      g_PaintHdc = previous_paint_hdc;
+      g_PaintPresented = previous_paint_presented;
+    }
+    else
+    {
+      PresentSurfaceToDC(hWnd, hdc);
+    }
     (void) EndPaint(hWnd, &ps);
+}
+
+static
+VOID PFORCEINLINE CALLBACK
+OGLWindow_OnPrintClient(
+    HWND hWnd,
+    HDC  hDC,
+    UINT options)
+{
+    UNREFERENCED_PARAMETER(options);
+    PresentSurfaceToDC(hWnd, hDC);
 }
 
 static
@@ -380,8 +660,90 @@ OGLWindow_OnWindowPosChanged(
 {
     if ((0 == (SWP_NOSIZE & lpwpos->flags)))
     {
-      SwitchToFiber(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+      WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+      BOOL is_secondary = IsSecondaryViewportWindow(hWnd);
+
+      if (pwglSurf && pwglSurf->rendered_during_windowpos)
+      {
+        pwglSurf->rendered_during_windowpos = FALSE;
+        return;
+      }
+
+      if (is_secondary)
+      {
+        RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE | RDW_NOCHILDREN);
+        FlushIfOriginMovingResize();
+        return;
+      }
+
+      if (SwitchToRenderFiber(hWnd, TRUE))
+      {
+        if (is_secondary)
+          FlushIfOriginMovingResize();
+      }
     }
+}
+
+static
+VOID PFORCEINLINE CALLBACK
+OGLWindow_OnSize(
+    HWND hWnd,
+    UINT state,
+    int  cx,
+    int  cy)
+{
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+    BOOL is_secondary = IsSecondaryViewportWindow(hWnd);
+
+    UNREFERENCED_PARAMETER(state);
+    UNREFERENCED_PARAMETER(cx);
+    UNREFERENCED_PARAMETER(cy);
+
+    if (pwglSurf)
+      pwglSurf->rendered_during_windowpos = FALSE;
+
+    if (is_secondary)
+    {
+      RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE | RDW_NOCHILDREN);
+      if (pwglSurf && g_WindowPosChangedHwnd == hWnd)
+        pwglSurf->rendered_during_windowpos = TRUE;
+      FlushIfOriginMovingResize();
+      return;
+    }
+
+    if (SwitchToRenderFiber(hWnd, TRUE))
+    {
+      if (pwglSurf && g_WindowPosChangedHwnd == hWnd)
+        pwglSurf->rendered_during_windowpos = TRUE;
+      if (is_secondary)
+        FlushIfOriginMovingResize();
+    }
+}
+
+static
+BOOL PFORCEINLINE CALLBACK
+OGLWindow_OnSizing(
+    HWND  hWnd,
+    UINT  edge,
+    RECT* prc)
+{
+    UNREFERENCED_PARAMETER(hWnd);
+    UNREFERENCED_PARAMETER(prc);
+
+    g_SizingEdge = edge;
+    return TRUE;
+}
+
+static
+VOID PFORCEINLINE CALLBACK
+OGLWindow_OnWindowPosChanging(
+    HWND        hWnd,
+    LPWINDOWPOS lpwpos)
+{
+    UNREFERENCED_PARAMETER(hWnd);
+
+    if (lpwpos && !(lpwpos->flags & SWP_NOSIZE))
+      lpwpos->flags |= SWP_NOCOPYBITS;
 }
 
 static
@@ -392,11 +754,24 @@ OGLWindow_OnNCCreate(
 {
     WGLSURFACE* pwglSurf;
 
-    if (pwglSurf = HeapAlloc(GetProcessHeap(), 0, sizeof(WGLSURFACE)))
+    if (pwglSurf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WGLSURFACE)))
     {
-      InitWGL();
+      HDC hdc;
 
-      CreateSurface(GetDC(hWnd), pwglSurf);
+      if (!InitWGL())
+      {
+        HeapFree(GetProcessHeap(), 0, pwglSurf);
+        return FALSE;
+      }
+
+      hdc = GetDC(hWnd);
+      if (!CreateSurface(hdc, pwglSurf))
+      {
+        ReleaseDC(hWnd, hdc);
+        HeapFree(GetProcessHeap(), 0, pwglSurf);
+        return FALSE;
+      }
+      ReleaseDC(hWnd, hdc);
 
       //HDC hdc = CreateMemoryDevice(180);
 
@@ -426,17 +801,18 @@ OGLWindow_OnNCCalcSize(
     NCCALCSIZE_PARAMS* lpcsp)
 {
     LRESULT lResult;
-    
-    if (DwmDefWindowProc(hWnd, WM_NCCALCSIZE, (WPARAM)fCalcValidRects, (LPARAM)lpcsp, &lResult))
+
+    if (!fCalcValidRects)
+      return FORWARD_WM_NCCALCSIZE(hWnd, fCalcValidRects, lpcsp, DefWindowProc);
+
+    lResult = DefWindowProc(hWnd, WM_NCCALCSIZE, TRUE, (LPARAM)lpcsp);
+    if (lResult != 0)
       return (UINT)lResult;
 
-    if (fCalcValidRects && (!IsZoomed(hWnd)))
-    {
-      DwmFlush();
-      SwitchToFiber(GetWindowLongPtr(hWnd, GWLP_USERDATA));
-    }
-
-    return FORWARD_WM_NCCALCSIZE(hWnd, fCalcValidRects, lpcsp, DefWindowProc);
+    lpcsp->rgrc[1].right = lpcsp->rgrc[1].left;
+    lpcsp->rgrc[1].bottom = lpcsp->rgrc[1].top;
+    lpcsp->rgrc[2] = lpcsp->rgrc[1];
+    return WVR_VALIDRECTS;
 }
 
 static
@@ -462,7 +838,6 @@ OGLWindow_OnEraseBkgnd(
 {
     UNREFERENCED_PARAMETER(hWnd);
     UNREFERENCED_PARAMETER(hDC);
-    ValidateRect(hWnd, 0);
 
     return TRUE;
 }
@@ -490,7 +865,9 @@ OGLWindow_OnExitMenuLoop(
     KillTimer(hWnd, 1);
     KillTimer(hWnd, 2);
 
-    SwitchToFiber(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+    LPVOID fiber = (LPVOID)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+    if (fiber)
+      SwitchToFiber(fiber);
 
     DwmFlush();
 }
@@ -500,8 +877,20 @@ VOID PFORCEINLINE CALLBACK
 OGLWindow_OnEnterSizeMove(
     HWND hWnd)
 {
-    SetTimer(hWnd, 1, USER_TIMER_MINIMUM, NULL);
-    SetTimer(hWnd, 2, USER_TIMER_MINIMUM+1, NULL);
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+    if (pwglSurf)
+      pwglSurf->in_modal_size_move = TRUE;
+
+    if (IsSecondaryViewportWindow(hWnd))
+    {
+      KillTimer(hWnd, 1);
+      KillTimer(hWnd, 2);
+    }
+    else
+    {
+      SetTimer(hWnd, 1, USER_TIMER_MINIMUM, NULL);
+      SetTimer(hWnd, 2, USER_TIMER_MINIMUM+1, NULL);
+    }
 }
 
 static
@@ -509,8 +898,12 @@ VOID PFORCEINLINE CALLBACK
 OGLWindow_OnExitSizeMove(
     HWND hWnd)
 {
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+    g_SizingEdge = 0;
     KillTimer(hWnd, 1);
     KillTimer(hWnd, 2);
+    if (pwglSurf)
+      pwglSurf->in_modal_size_move = FALSE;
     
     //D3DKMT_WAITFORVERTICALBLANKEVENT* pVbe;
     //
@@ -519,7 +912,9 @@ OGLWindow_OnExitSizeMove(
     //if (!NT_SUCCESS(D3DKMTWaitForVerticalBlankEvent(pVbe)))
     //  __debugbreak();
     //
-    SwitchToFiber(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+    LPVOID fiber = (LPVOID)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+    if (fiber)
+      SwitchToFiber(fiber);
 }
 
 static
@@ -528,13 +923,19 @@ OGLWindow_OnTimer(
     HWND hWnd,
     UINT uId)
 {
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+    if (pwglSurf && pwglSurf->in_modal_size_move && IsSecondaryViewportWindow(hWnd))
+      return;
+
     //D3DKMT_WAITFORVERTICALBLANKEVENT* pVbe;
     //
     //pVbe = GetWindowLongPtr(hWnd, 0);
     //
     //if (!NT_SUCCESS(D3DKMTWaitForVerticalBlankEvent(pVbe)))
     //  __debugbreak();
-    SwitchToFiber(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+    LPVOID fiber = (LPVOID)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+    if (fiber)
+      SwitchToFiber(fiber);
 }
 
 /****** Public Interface Implementation **************************************/
@@ -573,6 +974,46 @@ WINOGLWINDOWAPI BOOL WINAPI EndOGLWindowPaint(HDC hDC)
     return 1;
 }
 
+WINOGLWINDOWAPI BOOL WINAPI PresentOGLWindow(HWND hWnd)
+{
+    HDC hdc;
+    BOOL presented;
+
+    if (g_PaintHwnd == hWnd && g_PaintHdc)
+    {
+      presented = PresentSurfaceToDC(hWnd, g_PaintHdc);
+      if (presented)
+        g_PaintPresented = TRUE;
+      return presented;
+    }
+
+    hdc = GetDC(hWnd);
+    presented = PresentSurfaceToDC(hWnd, hdc);
+
+    if (hdc)
+      ReleaseDC(hWnd, hdc);
+    if (presented)
+      ValidateRect(hWnd, NULL);
+
+    return presented;
+}
+
+WINOGLWINDOWAPI BOOL WINAPI IsOGLWindowInSynchronousResizeRender(VOID)
+{
+    return g_SynchronousResizeRenderDepth > 0;
+}
+
+WINOGLWINDOWAPI HWND WINAPI GetOGLWindowSynchronousResizeHwnd(VOID)
+{
+    return g_SynchronousResizeHwnd;
+}
+
+WINOGLWINDOWAPI BOOL WINAPI IsOGLWindowInModalSizeMove(HWND hWnd)
+{
+    WGLSURFACE* pwglSurf = hWnd ? (WGLSURFACE*)GetWindowLongPtr(hWnd, 0) : NULL;
+    return pwglSurf && pwglSurf->in_modal_size_move;
+}
+
 WINOGLWINDOWAPI VOID WINAPI MessageFiberProc(void* unused)
 {
     for (;;)
@@ -597,7 +1038,25 @@ WINOGLWINDOWAPI LRESULT CALLBACK DefOGLWindowProc(HWND hWnd, UINT uMsg, WPARAM w
     switch(uMsg) {
     HANDLE_MSG(hWnd, WM_DESTROY, OGLWindow_OnDestroy);
     HANDLE_MSG(hWnd, WM_PAINT, OGLWindow_OnPaint);
-    HANDLE_MSG(hWnd, WM_WINDOWPOSCHANGED, OGLWindow_OnWindowPosChanged);
+    case WM_PRINTCLIENT:
+      OGLWindow_OnPrintClient(hWnd, (HDC)wParam, (UINT)lParam);
+      return 0;
+    HANDLE_MSG(hWnd, WM_SIZE, OGLWindow_OnSize);
+    case WM_SIZING:
+      return OGLWindow_OnSizing(hWnd, (UINT)wParam, (RECT*)lParam);
+    case WM_WINDOWPOSCHANGING:
+      OGLWindow_OnWindowPosChanging(hWnd, (LPWINDOWPOS)lParam);
+      return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    case WM_WINDOWPOSCHANGED:
+    {
+      HWND previous_windowpos_hwnd = g_WindowPosChangedHwnd;
+      LRESULT result;
+      g_WindowPosChangedHwnd = hWnd;
+      result = DefWindowProc(hWnd, uMsg, wParam, lParam);
+      g_WindowPosChangedHwnd = previous_windowpos_hwnd;
+      OGLWindow_OnWindowPosChanged(hWnd, (const LPWINDOWPOS)lParam);
+      return result;
+    }
     HANDLE_MSG(hWnd, WM_NCCREATE, OGLWindow_OnNCCreate);
     HANDLE_MSG(hWnd, WM_NCCALCSIZE, OGLWindow_OnNCCalcSize);
     HANDLE_MSG(hWnd, WM_NCHITTEST, OGLWindow_OnNCHitTest);
@@ -609,4 +1068,23 @@ WINOGLWINDOWAPI LRESULT CALLBACK DefOGLWindowProc(HWND hWnd, UINT uMsg, WPARAM w
     HANDLE_MSG(hWnd, WM_TIMER, OGLWindow_OnTimer);
     FORWARD_MSG(hWnd, uMsg, wParam, lParam, DefWindowProc);
     }
+}
+
+static 
+ATOM PFORCEINLINE APIPRIVATE
+RegisterOGLWindowClass(
+    VOID)
+{
+    WNDCLASSEX wcx = { sizeof(wcx) };
+
+    wcx.style         = CS_OWNDC | CS_BYTEALIGNCLIENT | CS_BYTEALIGNWINDOW;
+    wcx.lpfnWndProc   = DefOGLWindowProc;
+    wcx.hInstance     = GetModuleHandle(NULL);
+    wcx.cbWndExtra    = sizeof(void*);
+    wcx.hCursor       = LoadCursor(0, IDC_ARROW);
+    wcx.hbrBackground = NULL;
+    wcx.lpszMenuName  = NULL;
+    wcx.lpszClassName = OGLWINDOW_CLASS;
+
+    return RegisterClassEx(&wcx);
 }

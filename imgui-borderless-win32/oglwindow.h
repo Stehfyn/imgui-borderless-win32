@@ -18,7 +18,54 @@
 #include <winternl.h>
 #include <d3dkmthk.h>
 #include <gl/gl.h>
-#include <gl/wglext.h>
+
+/* Minimal WGL extension subset used by this project.  The Windows SDK does
+ * not ship gl/wglext.h, so keep the few required ARB tokens local. */
+#ifndef OGLWINDOW_WGLEXT_SUBSET
+#define OGLWINDOW_WGLEXT_SUBSET
+
+#ifndef WGL_DRAW_TO_WINDOW_ARB
+#define WGL_DRAW_TO_WINDOW_ARB           0x2001
+#endif
+#ifndef WGL_SUPPORT_OPENGL_ARB
+#define WGL_SUPPORT_OPENGL_ARB           0x2010
+#endif
+#ifndef WGL_PIXEL_TYPE_ARB
+#define WGL_PIXEL_TYPE_ARB               0x2013
+#endif
+#ifndef WGL_TYPE_RGBA_ARB
+#define WGL_TYPE_RGBA_ARB                0x202B
+#endif
+
+#ifndef WGL_ARB_pbuffer
+#define WGL_ARB_pbuffer 1
+DECLARE_HANDLE(HPBUFFERARB);
+#endif
+
+#ifndef WGL_DRAW_TO_PBUFFER_ARB
+#define WGL_DRAW_TO_PBUFFER_ARB          0x202D
+#endif
+
+#ifndef WGL_BIND_TO_TEXTURE_RGBA_ARB
+#define WGL_BIND_TO_TEXTURE_RGBA_ARB     0x2071
+#endif
+#ifndef WGL_TEXTURE_FORMAT_ARB
+#define WGL_TEXTURE_FORMAT_ARB           0x2072
+#endif
+#ifndef WGL_TEXTURE_TARGET_ARB
+#define WGL_TEXTURE_TARGET_ARB           0x2073
+#endif
+#ifndef WGL_TEXTURE_RGBA_ARB
+#define WGL_TEXTURE_RGBA_ARB             0x2076
+#endif
+#ifndef WGL_TEXTURE_2D_ARB
+#define WGL_TEXTURE_2D_ARB               0x207A
+#endif
+#ifndef WGL_FRONT_LEFT_ARB
+#define WGL_FRONT_LEFT_ARB               0x2083
+#endif
+
+#endif /* OGLWINDOW_WGLEXT_SUBSET */
 #ifndef NOOGLWINDOW
 
 
@@ -75,6 +122,8 @@ WINOGLWINDOWAPI VOID WINAPI InitOGLControls(VOID);
    * OpenGL window class
    */
 #define WC_OGLWINDOW           (OGLWINDOW_CLASS)
+#define OGLWINDOW_NO_QUIT_ON_DESTROY_PROP "OGLWindow_NoQuitOnDestroy"
+#define OGLWINDOW_SECONDARY_VIEWPORT_PROP "OGLWindow_SecondaryViewport"
 
    //---------------------------------------------------------------------------------------
    // OpenGL Window Control Styles
@@ -94,6 +143,10 @@ EXTERN_C NTSTATUS PFORCEINLINE WINAPI D3DKMTInitVerticalBlankEvent(HDC hdc, D3DK
 //WINOGLWINDOWAPI BOOL WINAPI OGLWindowPaintInit(HWND hwnd);
 WINOGLWINDOWAPI HDC WINAPI BeginOGLWindowPaint(HWND hWnd);
 WINOGLWINDOWAPI BOOL WINAPI EndOGLWindowPaint(HDC hDC);
+WINOGLWINDOWAPI BOOL WINAPI PresentOGLWindow(HWND hWnd);
+WINOGLWINDOWAPI BOOL WINAPI IsOGLWindowInSynchronousResizeRender(VOID);
+WINOGLWINDOWAPI HWND WINAPI GetOGLWindowSynchronousResizeHwnd(VOID);
+WINOGLWINDOWAPI BOOL WINAPI IsOGLWindowInModalSizeMove(HWND hWnd);
 WINOGLWINDOWAPI VOID WINAPI MessageFiberProc(void* unused);
 WINOGLWINDOWAPI LRESULT CALLBACK DefOGLWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -102,6 +155,12 @@ typedef struct _WGLSURFACE
   HDC         pbdc;
   HGLRC       pbrc;
   HPBUFFERARB hpb;
+  BYTE*       pixels;
+  SIZE_T      pixels_capacity;
+  int         width;
+  int         height;
+  BOOL        rendered_during_windowpos;
+  BOOL        in_modal_size_move;
 
 } WGLSURFACE;
 

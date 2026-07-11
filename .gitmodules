@@ -5,3 +5,4 @@
 [submodule "external/dear_bindings"]
 	path = external/dear_bindings
 	url = https://github.com/dearimgui/dear_bindings.git
+	branch = main
