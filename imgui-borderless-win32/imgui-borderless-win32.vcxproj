@@ -207,7 +207,32 @@
     <ClCompile Include="imgui\backends\imgui_impl_opengl3.cpp" />
     <ClCompile Include="imgui\backends\imgui_impl_win32.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="generate_dear_bindings.bat" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <ItemGroup>
+    <DearBindingsInput Include="imgui\imgui.h" />
+    <DearBindingsInput Include="imgui\imgui_internal.h" />
+    <DearBindingsInput Include="imgui\imconfig.h" />
+    <DearBindingsInput Include="imgui\backends\imgui_impl_win32.h" />
+    <DearBindingsInput Include="imgui\backends\imgui_impl_opengl3.h" />
+    <DearBindingsInput Include="generate_dear_bindings.bat" />
+    <DearBindingsInput Include="..\external\dear_bindings\dear_bindings.py" />
+    <DearBindingsInput Include="..\external\dear_bindings\src\**\*.py" />
+    <DearBindingsInput Include="..\external\dear_bindings\src\templates\**" />
+    <DearBindingsOutput Include="generated\dear_bindings\dcimgui.h" />
+    <DearBindingsOutput Include="generated\dear_bindings\dcimgui.cpp" />
+    <DearBindingsOutput Include="generated\dear_bindings\dcimgui_internal.h" />
+    <DearBindingsOutput Include="generated\dear_bindings\dcimgui_internal.cpp" />
+    <DearBindingsOutput Include="generated\dear_bindings\backends\dcimgui_impl_win32.h" />
+    <DearBindingsOutput Include="generated\dear_bindings\backends\dcimgui_impl_win32.cpp" />
+    <DearBindingsOutput Include="generated\dear_bindings\backends\dcimgui_impl_opengl3.h" />
+    <DearBindingsOutput Include="generated\dear_bindings\backends\dcimgui_impl_opengl3.cpp" />
+  </ItemGroup>
+  <Target Name="GenerateDearBindings" BeforeTargets="ClCompile" Inputs="@(DearBindingsInput)" Outputs="@(DearBindingsOutput)">
+    <Exec Command="call &quot;$(ProjectDir)generate_dear_bindings.bat&quot;" WorkingDirectory="$(ProjectDir)" />
+  </Target>
 </Project>
