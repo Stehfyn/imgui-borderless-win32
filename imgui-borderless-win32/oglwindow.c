@@ -103,6 +103,18 @@ PresentSurfaceToDC(
     HDC  hdc
     );
 
+static
+BOOL PFORCEINLINE APIPRIVATE
+IsLayeredPresentWindow(
+    HWND hWnd
+    );
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+PresentSurfaceLayered(
+    HWND hWnd
+    );
+
 static 
 VOID PFORCEINLINE APIPRIVATE
 SendPaint(
@@ -390,8 +402,28 @@ CreateSurface(
 
     wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
     //glReadBuffer(GL_FRONT);
-    
+
     //glPixelStorei(GL_PACK_ALIGNMENT, 4);
+
+    /* Layered-present surface: a bottom-up 32bpp DIB section at pbuffer size.
+     * glReadPixels writes rows bottom-up, matching the DIB layout, so the
+     * readback lands presentation-ready with no flip or staging copy.
+     * Failure is tolerated; the window then presents via the DC blit path. */
+    {
+      BITMAPINFO bmi = { 0 };
+      bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+      bmi.bmiHeader.biWidth = pwglSurf->width;
+      bmi.bmiHeader.biHeight = pwglSurf->height;
+      bmi.bmiHeader.biPlanes = 1;
+      bmi.bmiHeader.biBitCount = 32;
+      bmi.bmiHeader.biCompression = BI_RGB;
+
+      pwglSurf->uldc = CreateCompatibleDC(NULL);
+      if (pwglSurf->uldc)
+        pwglSurf->ulbmp = CreateDIBSection(pwglSurf->uldc, &bmi, DIB_RGB_COLORS, &pwglSurf->ulbits, NULL, 0);
+      if (pwglSurf->ulbmp)
+        pwglSurf->ulbmp_prev = (HBITMAP)SelectObject(pwglSurf->uldc, pwglSurf->ulbmp);
+    }
 
     return TRUE;
 }
@@ -446,6 +478,84 @@ PresentSurfaceToDC(
       StretchDIBits(hdc, 0, 0, RECTWIDTH(rc), RECTHEIGHT(rc), 0, 0, sz.cx, sz.cy, pwglSurf->pixels, (const BITMAPINFO*)&bmih, DIB_RGB_COLORS, SRCCOPY);
     }
     GdiFlush();
+    QueryPerformanceCounter(&qpc_end);
+    g_LastPresentTicks = qpc_end.QuadPart - qpc_start.QuadPart;
+
+    return TRUE;
+}
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+IsLayeredPresentWindow(
+    HWND hWnd)
+{
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+
+    /* Secondary viewports may carry WS_EX_LAYERED from SetWindowAlpha
+     * (SetLayeredWindowAttributes mode), which is mutually exclusive with
+     * UpdateLayeredWindow-style presentation on the same window. */
+    return pwglSurf && pwglSurf->uldc && pwglSurf->ulbits &&
+           !IsSecondaryViewportWindow(hWnd) &&
+           (GetWindowLongPtr(hWnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+}
+
+static
+BOOL PFORCEINLINE APIPRIVATE
+PresentSurfaceLayered(
+    HWND hWnd)
+{
+    /* The latch: UpdateLayeredWindowIndirect carries bitmap + geometry in one
+     * window-manager transaction, so the compositor can never pair fresh
+     * geometry with stale content the way separately presented swapchain/blt
+     * content can.  During a synchronous resize render this runs inside the
+     * modal loop's SetWindowPos transaction; ULW_EX_NORESIZE makes the content
+     * update join that transaction instead of competing for the window size. */
+    RECT rc;
+    SIZE sz;
+    POINT ptSrc;
+    UPDATELAYEREDWINDOWINFO ulwi = { sizeof(ulwi) };
+    LARGE_INTEGER qpc_start;
+    LARGE_INTEGER qpc_end;
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+
+    if (!pwglSurf || !pwglSurf->uldc || !pwglSurf->ulbits)
+      return FALSE;
+
+    GetClientRect(hWnd, &rc);
+    sz.cx = RECTWIDTH(rc);
+    sz.cy = RECTHEIGHT(rc);
+    if (sz.cx <= 0 || sz.cy <= 0)
+      return FALSE;
+
+    /* ULW would resize the window to psize; a clamped sprite must not shrink
+     * the window, so windows larger than the surface use the DC blit path. */
+    if (sz.cx > pwglSurf->width || sz.cy > pwglSurf->height)
+      return FALSE;
+
+    if (!wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc))
+      return FALSE;
+
+    QueryPerformanceCounter(&qpc_start);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    glPixelStorei(GL_PACK_ROW_LENGTH, pwglSurf->width);
+    glReadPixels(0, 0, sz.cx, sz.cy, GL_BGRA, GL_UNSIGNED_BYTE, pwglSurf->ulbits);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+
+    /* Bottom-up DIB: GL rows occupy the bitmap's bottom sz.cy rows, which in
+     * DC coordinates start at y = surface_height - sz.cy. */
+    ptSrc.x = 0;
+    ptSrc.y = pwglSurf->height - sz.cy;
+
+    ulwi.hdcSrc = pwglSurf->uldc;
+    ulwi.pptSrc = &ptSrc;
+    ulwi.psize = &sz;
+    ulwi.dwFlags = ULW_OPAQUE;
+    if (IsOGLWindowInSynchronousResizeRender() || IsOGLWindowInModalSizeMove(hWnd))
+      ulwi.dwFlags |= ULW_EX_NORESIZE;
+
+    if (!UpdateLayeredWindowIndirect(hWnd, &ulwi))
+      return FALSE;
+
     QueryPerformanceCounter(&qpc_end);
     g_LastPresentTicks = qpc_end.QuadPart - qpc_start.QuadPart;
 
@@ -597,6 +707,12 @@ OGLWindow_OnDestroy(
         wglReleasePbufferDCARB(pwglSurf->hpb, pwglSurf->pbdc);
       if (pwglSurf->hpb && wglDestroyPbufferARB)
         wglDestroyPbufferARB(pwglSurf->hpb);
+      if (pwglSurf->uldc && pwglSurf->ulbmp_prev)
+        SelectObject(pwglSurf->uldc, pwglSurf->ulbmp_prev);
+      if (pwglSurf->ulbmp)
+        DeleteObject(pwglSurf->ulbmp);
+      if (pwglSurf->uldc)
+        DeleteDC(pwglSurf->uldc);
       if (pwglSurf->pixels)
         HeapFree(GetProcessHeap(), 0, pwglSurf->pixels);
       SetWindowLongPtr(hWnd, 0, 0);
@@ -634,7 +750,7 @@ OGLWindow_OnPaint(
       g_PaintHdc = previous_paint_hdc;
       g_PaintPresented = previous_paint_presented;
     }
-    else
+    else if (!IsLayeredPresentWindow(hWnd) || !PresentSurfaceLayered(hWnd))
     {
       PresentSurfaceToDC(hWnd, hdc);
     }
@@ -802,6 +918,20 @@ OGLWindow_OnNCCalcSize(
 {
     LRESULT lResult;
 
+    /* Layered latch mode is fully client-area: the ULW sprite covers the
+     * exact window rect, so keep client == window (no nonclient frame).
+     * When maximized, inset by the invisible resize frame so the client does
+     * not spill past the monitor work area. */
+    if (IsLayeredPresentWindow(hWnd))
+    {
+      if (IsZoomed(hWnd))
+      {
+        int frame = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+        InflateRect(&lpcsp->rgrc[0], -frame, -frame);
+      }
+      return 0;
+    }
+
     if (!fCalcValidRects)
       return FORWARD_WM_NCCALCSIZE(hWnd, fCalcValidRects, lpcsp, DefWindowProc);
 
@@ -823,6 +953,33 @@ OGLWindow_OnNCHitTest(
     int  y)
 {
     LRESULT lResult;
+
+    /* Layered mode has no nonclient area (client == window), so DefWindowProc
+     * would report HTCLIENT everywhere; synthesize the resize borders. */
+    if (IsLayeredPresentWindow(hWnd) && !IsZoomed(hWnd))
+    {
+      static const UINT hits[3][3] = {
+        { HTTOPLEFT,    HTTOP,    HTTOPRIGHT    },
+        { HTLEFT,       HTCLIENT, HTRIGHT      },
+        { HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT },
+      };
+      RECT rc;
+      int frame = GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+      int row = 1;
+      int col = 1;
+
+      GetWindowRect(hWnd, &rc);
+      if (y < rc.top + frame)
+        row = 0;
+      else if (y >= rc.bottom - frame)
+        row = 2;
+      if (x < rc.left + frame)
+        col = 0;
+      else if (x >= rc.right - frame)
+        col = 2;
+
+      return hits[row][col];
+    }
 
     if (DwmDefWindowProc(hWnd, WM_NCHITTEST, 0L, MAKELPARAM(x, y), &lResult))
       return (UINT)lResult;
@@ -979,6 +1136,21 @@ WINOGLWINDOWAPI BOOL WINAPI PresentOGLWindow(HWND hWnd)
     HDC hdc;
     BOOL presented;
 
+    if (IsLayeredPresentWindow(hWnd))
+    {
+      presented = PresentSurfaceLayered(hWnd);
+      if (presented)
+      {
+        if (g_PaintHwnd == hWnd)
+          g_PaintPresented = TRUE;
+        else
+          ValidateRect(hWnd, NULL);
+        return TRUE;
+      }
+      /* fall through to the DC blit when the layered present is unavailable
+       * (e.g. window grew past the surface) */
+    }
+
     if (g_PaintHwnd == hWnd && g_PaintHdc)
     {
       presented = PresentSurfaceToDC(hWnd, g_PaintHdc);
@@ -1046,6 +1218,29 @@ WINOGLWINDOWAPI LRESULT CALLBACK DefOGLWindowProc(HWND hWnd, UINT uMsg, WPARAM w
       return OGLWindow_OnSizing(hWnd, (UINT)wParam, (RECT*)lParam);
     case WM_WINDOWPOSCHANGING:
       OGLWindow_OnWindowPosChanging(hWnd, (LPWINDOWPOS)lParam);
+      return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    case WM_NCPAINT:
+    case WM_NCACTIVATE:
+      /* In layered present mode the ULW sprite is the only content source;
+       * DefWindowProc would paint the classic (non-DWM) frame into the layer
+       * and fight every UpdateLayeredWindowIndirect. */
+      if (IsLayeredPresentWindow(hWnd))
+        return (uMsg == WM_NCACTIVATE) ? TRUE : 0;
+      return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    case WM_SETTEXT:
+    case WM_SETICON:
+      /* Same classic-frame repaint hazard: let DefWindowProc store the text /
+       * icon but hide the window from its redraw pass while it does. */
+      if (IsLayeredPresentWindow(hWnd))
+      {
+        LONG_PTR style = GetWindowLongPtr(hWnd, GWL_STYLE);
+        LRESULT lResult;
+
+        SetWindowLongPtr(hWnd, GWL_STYLE, style & ~WS_VISIBLE);
+        lResult = DefWindowProc(hWnd, uMsg, wParam, lParam);
+        SetWindowLongPtr(hWnd, GWL_STYLE, style);
+        return lResult;
+      }
       return DefWindowProc(hWnd, uMsg, wParam, lParam);
     case WM_WINDOWPOSCHANGED:
     {

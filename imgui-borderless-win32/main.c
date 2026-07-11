@@ -76,7 +76,7 @@ static void draw(HWND hWnd)
   }
 
   {
-    if (ImGui_GetFrameCount() % 180)
+    if (0 == (ImGui_GetFrameCount() % 180))
     {
       TCHAR szTitle[256];
       _stprintf(szTitle, TEXT("Application average %.3f ms/frame (%.1f FPS)"), 1000.0f / io->Framerate, io->Framerate);
@@ -252,9 +252,13 @@ wWinMain(
     g_MainFiber = ConvertThreadToFiber(NULL);
     LPVOID hMsgFiber = CreateFiber(0, MessageFiberProc, g_MainFiber);
 
-    HWND hwnd = OGLWindow_Create(TEXT("OGLWindow"), 0, 0, 
+    /* Pass WS_EX_LAYERED to opt into the UpdateLayeredWindowIndirect present
+     * path (atomic content+geometry latch, flicker-free resize) — but that
+     * mode is a whole-window sprite: DWM caption/frame are not drawn and all
+     * chrome must be app-rendered.  Default: normal window, DWM frame. */
+    HWND hwnd = OGLWindow_CreateEx(0, TEXT("OGLWindow"), 0, 0,
       //WS_CLIPCHILDREN|WS_CLIPSIBLINGS|
-      WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, 
+      WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
       CW_USEDEFAULT, CW_USEDEFAULT, 1080, 720, GetModuleHandle(NULL),
       g_MainFiber);
     g_MainHwnd = hwnd;

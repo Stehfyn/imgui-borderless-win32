@@ -139,6 +139,13 @@ typedef void(__stdcall* RENDERPROC)(HWND hwnd);
            CreateWindow(WC_OGLWINDOW, lpszTitle,                                            \
                dwStyle, X, Y, nWidth, nHeight, hwndP, (HMENU)(id), hInstance, renderproc)
 
+/* WS_EX_LAYERED here opts the window into the UpdateLayeredWindowIndirect
+ * present path: content + geometry latch atomically in one window-manager
+ * transaction (no resize flicker), at the cost of DWM nonclient rendering. */
+#define OGLWindow_CreateEx(dwExStyle, lpszTitle, hwndP, id, dwStyle, X, Y, nWidth, nHeight, hInstance, renderproc)   \
+           CreateWindowEx(dwExStyle, WC_OGLWINDOW, lpszTitle,                               \
+               dwStyle, X, Y, nWidth, nHeight, hwndP, (HMENU)(id), hInstance, renderproc)
+
 EXTERN_C NTSTATUS PFORCEINLINE WINAPI D3DKMTInitVerticalBlankEvent(HDC hdc, D3DKMT_WAITFORVERTICALBLANKEVENT* pVbe);
 //WINOGLWINDOWAPI BOOL WINAPI OGLWindowPaintInit(HWND hwnd);
 WINOGLWINDOWAPI HDC WINAPI BeginOGLWindowPaint(HWND hWnd);
@@ -161,6 +168,10 @@ typedef struct _WGLSURFACE
   int         height;
   BOOL        rendered_during_windowpos;
   BOOL        in_modal_size_move;
+  HDC         uldc;        /* layered-present memory DC (DIB section) */
+  HBITMAP     ulbmp;
+  HBITMAP     ulbmp_prev;
+  VOID*       ulbits;
 
 } WGLSURFACE;
 
