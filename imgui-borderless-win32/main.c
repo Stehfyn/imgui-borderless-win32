@@ -6,8 +6,9 @@
 #include <tchar.h>
 #include <assert.h>
 #include <GL/gl.h>
-#include "oglwindow.h"
-#include "swcadef.h"     
+#include "wglwindow.h"
+#include "dwmframe.h"
+#include "swcadef.h"
 
 #include "dcimgui.h"
 #include "dcimgui_internal.h"
@@ -27,7 +28,6 @@ typedef BOOL(WINAPI* PFNWGLSWAPINTERVALEXTPROC) (int interval);
 PFNWGLSWAPINTERVALEXTPROC      wglSwapIntervalEXT;
 
 static RenderFunction g_ClientRenderFunction;
-static BOOL           g_ClientIsBorderless = FALSE;
 
 // Data stored per platform window
 typedef struct WGL_WindowData
@@ -36,14 +36,14 @@ typedef struct WGL_WindowData
     HGLRC hRC;
 } WGL_WindowData;
 
-typedef struct OGLViewportData
+typedef struct WGLViewportData
 {
     HWND  Hwnd;
     HWND  HwndParent;
     BOOL  HwndOwned;
     DWORD DwStyle;
     DWORD DwExStyle;
-} OGLViewportData;
+} WGLViewportData;
 
 // Data
 static HGLRC            g_hRC;
@@ -60,10 +60,26 @@ static void draw(HWND hWnd)
 {
   static ImVec4 clear_color = { 0.0f, 0.0f, 0.0f, 0.0f };
   ImGuiIO* io = ImGui_GetIO();
+  WGLSURFACE* pwglSurfFrame = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+
+  /* InFrame latch (reference): viewport create/destroy inside NewFrame /
+   * UpdatePlatformWindows sends WM_WINDOWPOSCHANGED / WM_ACTIVATE to this
+   * window synchronously mid-frame; a modal repaint from there would
+   * re-enter the frame. */
+  if (pwglSurfFrame)
+    pwglSurfFrame->in_frame = TRUE;
 
   cImGui_ImplOpenGL3_NewFrame();
   cImGui_ImplWin32_NewFrame();
   ImGui_NewFrame();
+
+  /* Client == window (dwmframe): the caption band paints over the top capH
+   * pixels; inset the viewport work area so the dockspace and any windows
+   * lay out below the band.  Applied per frame (locks in next NewFrame). */
+  {
+    ImGuiViewportP* vp = (ImGuiViewportP*)ImGui_GetMainViewport();
+    vp->BuildWorkInsetMin.y += (float)DwmFrameCaptionHeight(hWnd);
+  }
 
   // Dockspace
   {
@@ -110,9 +126,9 @@ static void draw(HWND hWnd)
   // Update and Render additional Platform Windows
   if (io->ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
   {
-    HWND sync_resize_hwnd = GetOGLWindowSynchronousResizeHwnd();
+    HWND sync_resize_hwnd = GetWGLWindowSynchronousResizeHwnd(hWnd);
     ImGui_UpdatePlatformWindows();
-    if (sync_resize_hwnd && GetPropA(sync_resize_hwnd, OGLWINDOW_SECONDARY_VIEWPORT_PROP))
+    if (sync_resize_hwnd && GetPropA(sync_resize_hwnd, WGLWINDOW_SECONDARY_VIEWPORT_PROP))
         Hook_RenderPlatformWindows(sync_resize_hwnd);
     else
         ImGui_RenderPlatformWindowsDefault();
@@ -121,13 +137,21 @@ static void draw(HWND hWnd)
     wglMakeCurrent(g_MainWindow.hDC, g_hRC);
   }
 
-  SwapBuffers(g_MainWindow.hDC);
-  // Present
+  /* No SwapBuffers: the pbuffer is never displayed by GL, and swapping it
+   * would rotate the frame just rendered out of the read buffer — the
+   * present would then deliver the PREVIOUS frame, pairing every resize
+   * tick's new geometry with old-size content.
+   * The frame ends here (clear the latch before the present, reference
+   * PresentFrame shape), then present on this stack with the flavor the
+   * window control pinned for the calling context. */
+  if (pwglSurfFrame)
+    pwglSurfFrame->in_frame = FALSE;
+  PresentWGLWindow(hWnd);
 }
 
 static void __stdcall render(HWND hWnd)
 {
-    HDC hdc = BeginOGLWindowPaint(hWnd);
+    HDC hdc = BeginWGLWindowPaint(hWnd);
 
     if (g_ClientRenderFunction)
     {
@@ -135,11 +159,11 @@ static void __stdcall render(HWND hWnd)
       //DwmFlush();
     }
 
-    EndOGLWindowPaint(hdc);
+    EndWGLWindowPaint(hdc);
 }
 
-static void InstallOGLViewportHooks(void);
-static OGLViewportData* Hook_GetViewportData(ImGuiViewport* viewport);
+static void InstallWGLViewportHooks(void);
+static WGLViewportData* Hook_GetViewportData(ImGuiViewport* viewport);
 static void Hook_UpdateViewportRectFromHwnd(ImGuiViewport* viewport, HWND hwnd, BOOL update_pos, BOOL update_size);
 static LRESULT CALLBACK ImGuiSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
@@ -181,6 +205,14 @@ static LRESULT CALLBACK ImGuiSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
         DestroyWindow(hWnd);
         return 0;
     }
+
+    /* A capture-tracked caption-button press owns the mouse stream BEFORE
+     * imgui sees it: imgui never saw the NC button-down, so its WM_LBUTTONUP
+     * path would ReleaseCapture and the synchronous WM_CAPTURECHANGED would
+     * cancel the press before the commit ran. */
+    if (IsWGLWindowCaptionPressActive(hWnd) &&
+        (uMsg == WM_MOUSEMOVE || uMsg == WM_LBUTTONUP || uMsg == WM_CAPTURECHANGED))
+        return DefWGLWindowProc(hWnd, uMsg, wParam, lParam);
 
     if (cImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
       return 1;
@@ -228,7 +260,7 @@ static LRESULT CALLBACK ImGuiSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
         }
     }
 
-    return DefOGLWindowProc(hWnd, uMsg, wParam, lParam);
+    return DefWGLWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
 int 
@@ -248,17 +280,19 @@ wWinMain(
     float main_scale = cImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY));
     SetWindowCompositionAttribute = (PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE)GetProcAddress(GetModuleHandle(TEXT("user32.dll")), "SetWindowCompositionAttribute");
     
-    InitOGLControls();
+    InitWGLControls();
     g_MainFiber = ConvertThreadToFiber(NULL);
     LPVOID hMsgFiber = CreateFiber(0, MessageFiberProc, g_MainFiber);
 
-    /* Pass WS_EX_LAYERED to opt into the UpdateLayeredWindowIndirect present
-     * path (atomic content+geometry latch, flicker-free resize) — but that
-     * mode is a whole-window sprite: DWM caption/frame are not drawn and all
-     * chrome must be app-rendered.  Default: normal window, DWM frame. */
-    HWND hwnd = OGLWindow_CreateEx(0, TEXT("OGLWindow"), 0, 0,
-      //WS_CLIPCHILDREN|WS_CLIPSIBLINGS|
-      WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
+    /* Canonical immersive-window creation (reference verbatim):
+     * WS_EX_NOREDIRECTIONBITMAP + BCS_WINDOW.  NO WS_CAPTION — with it, DWM
+     * draws the standard frame geometry into the nonclient border strips
+     * (visible borders around the client) and refights the composed chrome
+     * on every resize tick.  GL renders into the pbuffer; each present
+     * delivers client + caption chrome through the composition swapchain's
+     * present ladder as one atomic present. */
+    HWND hwnd = WGLWindow_CreateEx(WS_EX_NOREDIRECTIONBITMAP, TEXT("WGLWindow"), 0, 0,
+      BCS_WINDOW,
       CW_USEDEFAULT, CW_USEDEFAULT, 1080, 720, GetModuleHandle(NULL),
       g_MainFiber);
     g_MainHwnd = hwnd;
@@ -290,7 +324,7 @@ wWinMain(
     cImGui_ImplWin32_EnableDpiAwareness();
 
     if (io->ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-        InstallOGLViewportHooks();
+        InstallWGLViewportHooks();
     int quit = 0;
 
     SubclassWindow(hwnd, ImGuiSubclassProc);
@@ -305,15 +339,10 @@ wWinMain(
     {
         SwitchToFiber(hMsgFiber);
 
-
-        InvalidateRect(hwnd, 0, 0);
-        //RedrawWindow(hwnd, 0, 0, RDW_ERASE | RDW_UPDATENOW);
-        //wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
+        /* draw() presents directly; no InvalidateRect — WM_PAINT is for
+         * genuine exposure only. */
         draw(hwnd);
-        //glFinish();
-        //wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
-        //SwapBuffers(pwglSurf->pbdc);
-        if (!IsOGLWindowInSynchronousResizeRender())
+        if (!IsWGLWindowInSynchronousResizeRender(hwnd))
             D3DKMTWaitForVerticalBlankEvent(&vbe);
 
     }
@@ -333,14 +362,14 @@ static HWND Hook_GetHwndFromViewport(ImGuiViewport* viewport)
     return viewport ? (HWND)viewport->PlatformHandle : NULL;
 }
 
-static OGLViewportData* Hook_GetViewportData(ImGuiViewport* viewport)
+static WGLViewportData* Hook_GetViewportData(ImGuiViewport* viewport)
 {
-    OGLViewportData* data;
+    WGLViewportData* data;
 
     if (!viewport || viewport == ImGui_GetMainViewport())
         return NULL;
 
-    data = (OGLViewportData*)viewport->PlatformUserData;
+    data = (WGLViewportData*)viewport->PlatformUserData;
     if (!data || data->Hwnd != (HWND)viewport->PlatformHandle)
         return NULL;
 
@@ -363,7 +392,7 @@ static void Hook_AdjustWindowRect(ImGuiViewport* viewport, RECT* rect, DWORD sty
     AdjustWindowRectEx(rect, style, FALSE, ex_style);
 }
 
-static void Hook_UpdateStyleFromWindow(OGLViewportData* data)
+static void Hook_UpdateStyleFromWindow(WGLViewportData* data)
 {
     data->DwStyle = (DWORD)GetWindowLongPtr(data->Hwnd, GWL_STYLE);
     data->DwExStyle = (DWORD)GetWindowLongPtr(data->Hwnd, GWL_EXSTYLE);
@@ -371,14 +400,14 @@ static void Hook_UpdateStyleFromWindow(OGLViewportData* data)
 
 static WGLSURFACE* Hook_GetViewportSurface(ImGuiViewport* viewport)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     HWND hwnd = data ? data->Hwnd : Hook_GetHwndFromViewport(viewport);
     return hwnd ? (WGLSURFACE*)GetWindowLongPtr(hwnd, 0) : NULL;
 }
 
 static void Hook_Platform_CreateWindow(ImGuiViewport* viewport)
 {
-    OGLViewportData* data = (OGLViewportData*)CIM_ALLOC(sizeof(OGLViewportData));
+    WGLViewportData* data = (WGLViewportData*)CIM_ALLOC(sizeof(WGLViewportData));
     if (!data)
         return;
 
@@ -398,7 +427,7 @@ static void Hook_Platform_CreateWindow(ImGuiViewport* viewport)
 
     data->Hwnd = CreateWindowEx(
         data->DwExStyle,
-        WC_OGLWINDOW,
+        WC_WGLWINDOW,
         TEXT("Untitled"),
         data->DwStyle,
         rect.left,
@@ -422,8 +451,8 @@ static void Hook_Platform_CreateWindow(ImGuiViewport* viewport)
     viewport->PlatformHandle = viewport->PlatformHandleRaw = data->Hwnd;
 
     SetPropA(data->Hwnd, "IMGUI_CONTEXT", ImGui_GetCurrentContext());
-    SetPropA(data->Hwnd, OGLWINDOW_NO_QUIT_ON_DESTROY_PROP, (HANDLE)1);
-    SetPropA(data->Hwnd, OGLWINDOW_SECONDARY_VIEWPORT_PROP, (HANDLE)1);
+    SetPropA(data->Hwnd, WGLWINDOW_NO_QUIT_ON_DESTROY_PROP, (HANDLE)1);
+    SetPropA(data->Hwnd, WGLWINDOW_SECONDARY_VIEWPORT_PROP, (HANDLE)1);
     SubclassWindow(data->Hwnd, ImGuiSubclassProc);
 }
 
@@ -438,7 +467,7 @@ static void Hook_Platform_DestroyWindow(ImGuiViewport* viewport)
         return;
     }
 
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     if (data)
     {
         if (GetCapture() == data->Hwnd)
@@ -451,7 +480,7 @@ static void Hook_Platform_DestroyWindow(ImGuiViewport* viewport)
         if (data->Hwnd)
         {
             RemovePropA(data->Hwnd, "IMGUI_CONTEXT");
-            RemovePropA(data->Hwnd, OGLWINDOW_SECONDARY_VIEWPORT_PROP);
+            RemovePropA(data->Hwnd, WGLWINDOW_SECONDARY_VIEWPORT_PROP);
             if (data->HwndOwned)
                 DestroyWindow(data->Hwnd);
         }
@@ -467,7 +496,7 @@ static void Hook_Platform_DestroyWindow(ImGuiViewport* viewport)
 
 static void Hook_Platform_ShowWindow(ImGuiViewport* viewport)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     BOOL avoid_bringing_parent_to_front;
     if (!data || !data->Hwnd)
         return;
@@ -486,11 +515,11 @@ static void Hook_Platform_ShowWindow(ImGuiViewport* viewport)
 
 static void Hook_Platform_SetWindowPos(ImGuiViewport* viewport, ImVec2 pos)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     RECT rect;
     if (!data || !data->Hwnd)
         return;
-    if (IsOGLWindowInModalSizeMove(data->Hwnd))
+    if (IsWGLWindowInModalSizeMove(data->Hwnd))
         return;
 
     rect.left = (LONG)pos.x;
@@ -505,7 +534,7 @@ static void Hook_Platform_SetWindowPos(ImGuiViewport* viewport, ImVec2 pos)
 
 static void Hook_Platform_GetWindowPos(ImGuiViewport* viewport, ImVec2* out_pos)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     HWND hwnd = data ? data->Hwnd : Hook_GetHwndFromViewport(viewport);
     POINT pos = { 0, 0 };
 
@@ -520,11 +549,11 @@ static void Hook_Platform_GetWindowPos(ImGuiViewport* viewport, ImVec2* out_pos)
 
 static void Hook_Platform_SetWindowSize(ImGuiViewport* viewport, ImVec2 size)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     RECT rect;
     if (!data || !data->Hwnd)
         return;
-    if (IsOGLWindowInModalSizeMove(data->Hwnd))
+    if (IsWGLWindowInModalSizeMove(data->Hwnd))
         return;
 
     rect.left = 0;
@@ -539,7 +568,7 @@ static void Hook_Platform_SetWindowSize(ImGuiViewport* viewport, ImVec2 size)
 
 static void Hook_Platform_GetWindowSize(ImGuiViewport* viewport, ImVec2* out_size)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     HWND hwnd = data ? data->Hwnd : Hook_GetHwndFromViewport(viewport);
     RECT rect = { 0, 0, 0, 0 };
 
@@ -561,7 +590,7 @@ static void Hook_Platform_GetWindowFramebufferScale(ImGuiViewport* viewport, ImV
 
 static void Hook_Platform_SetWindowFocus(ImGuiViewport* viewport)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     if (!data || !data->Hwnd)
         return;
 
@@ -584,7 +613,7 @@ static bool Hook_Platform_GetWindowMinimized(ImGuiViewport* viewport)
 
 static void Hook_Platform_SetWindowTitle(ImGuiViewport* viewport, const char* title)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     int count;
     wchar_t stack_title[256];
     wchar_t* wide_title = stack_title;
@@ -614,7 +643,7 @@ static void Hook_Platform_SetWindowTitle(ImGuiViewport* viewport, const char* ti
 
 static void Hook_Platform_SetWindowAlpha(ImGuiViewport* viewport, float alpha)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     DWORD ex_style;
     if (!data || !data->Hwnd)
         return;
@@ -638,7 +667,7 @@ static void Hook_Platform_SetWindowAlpha(ImGuiViewport* viewport, float alpha)
 
 static void Hook_Platform_UpdateWindow(ImGuiViewport* viewport)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     DWORD next_style;
     DWORD next_ex_style;
     HWND next_parent;
@@ -648,7 +677,7 @@ static void Hook_Platform_UpdateWindow(ImGuiViewport* viewport)
     next_parent = Hook_GetHwndFromViewport(viewport->ParentViewport);
     if (next_parent != data->HwndParent)
     {
-        if (IsOGLWindowInModalSizeMove(data->Hwnd))
+        if (IsWGLWindowInModalSizeMove(data->Hwnd))
             return;
         data->HwndParent = next_parent;
         SetWindowLongPtr(data->Hwnd, GWLP_HWNDPARENT, (LONG_PTR)data->HwndParent);
@@ -657,7 +686,7 @@ static void Hook_Platform_UpdateWindow(ImGuiViewport* viewport)
     Hook_GetWin32StyleFromViewportFlags(viewport->Flags, &next_style, &next_ex_style);
     if (data->DwStyle != next_style || data->DwExStyle != next_ex_style)
     {
-        if (IsOGLWindowInModalSizeMove(data->Hwnd))
+        if (IsWGLWindowInModalSizeMove(data->Hwnd))
             return;
         BOOL top_most_changed = (data->DwExStyle & WS_EX_TOPMOST) != (next_ex_style & WS_EX_TOPMOST);
         HWND insert_after = top_most_changed ? ((viewport->Flags & ImGuiViewportFlags_TopMost) ? HWND_TOPMOST : HWND_NOTOPMOST) : NULL;
@@ -693,7 +722,7 @@ static void Hook_Platform_RenderWindow(ImGuiViewport* viewport, void* user_data)
 
 static void Hook_Platform_SwapBuffers(ImGuiViewport* viewport, void* user_data)
 {
-    OGLViewportData* data = Hook_GetViewportData(viewport);
+    WGLViewportData* data = Hook_GetViewportData(viewport);
     WGLSURFACE* surface;
     UNREFERENCED_PARAMETER(user_data);
 
@@ -703,7 +732,7 @@ static void Hook_Platform_SwapBuffers(ImGuiViewport* viewport, void* user_data)
     surface = Hook_GetViewportSurface(viewport);
     if (surface)
         wglMakeCurrent(surface->pbdc, surface->pbrc);
-    PresentOGLWindow(data->Hwnd);
+    PresentWGLWindow(data->Hwnd);
 }
 
 static void Hook_RenderOnePlatformWindow(ImGuiPlatformIO* platform_io, ImGuiViewport* viewport)
@@ -806,7 +835,7 @@ static void Hook_Renderer_RenderWindow(ImGuiViewport* viewport, void* user_data)
     cImGui_ImplOpenGL3_RenderDrawData(viewport->DrawData);
 }
 
-static void InstallOGLViewportHooks(void)
+static void InstallWGLViewportHooks(void)
 {
     ImGuiPlatformIO* platform_io = ImGui_GetPlatformIO();
 

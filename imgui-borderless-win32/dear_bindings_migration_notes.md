@@ -14,7 +14,7 @@ Changes made:
   solution/project.
 - Added generated binding sources, Dear ImGui core sources, and the Win32 /
   OpenGL3 backend sources to the Visual Studio project.
-- Kept the local WGL extension subset in `oglwindow.h` and removed direct
+- Kept the local WGL extension subset in `wglwindow.h` and removed direct
   `gl/wglext.h` includes.
 - Updated the nested `imgui` checkout to current `origin/docking` core/backend
   files while preserving the pre-existing dirty example-project edits.
@@ -33,4 +33,4 @@ Useful paths:
 - `external/dear_bindings/`
 - `imgui-borderless-win32.vcxproj`
 - `imgui-borderless-win32.sln`
-- `oglwindow.h`
+- `wglwindow.h`

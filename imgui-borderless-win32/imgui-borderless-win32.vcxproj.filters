@@ -18,7 +18,13 @@
     <ClInclude Include="swcadef.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="oglwindow.h">
+    <ClInclude Include="wglwindow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dwmframe.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="dxgipresent.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="generated\dear_bindings\dcimgui.h">
@@ -50,7 +56,13 @@
     <ClCompile Include="main.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="oglwindow.c">
+    <ClCompile Include="wglwindow.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dwmframe.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="dxgipresent.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="generated\dear_bindings\dcimgui.cpp">
