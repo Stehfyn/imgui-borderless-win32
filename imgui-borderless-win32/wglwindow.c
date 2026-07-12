@@ -1208,10 +1208,16 @@ WGLWindow_OnSysCommand(
     int  x,
     int  y)
 {
-    /* Disable the ALT application menu for presenter windows (reference:
-     * the classic menu loop has no chrome to draw into). */
     if ((cmd & 0xFFF0) == SC_KEYMENU && IsDXGIPresentWindow(hWnd))
+    {
+      /* Alt+Space (char code in x): the system menu, tracked ourselves at
+       * the caption anchor — DefWindowProc's placement assumes a standard
+       * NC caption.  Bare ALT stays swallowed (no classic menu bar). */
+      DWMFRAME* frame = GetDwmFrame(hWnd);
+      if (frame && ' ' == x)
+        DwmFrameShowSystemMenu(frame, hWnd, -1, -1);
       return;
+    }
 
     FORWARD_WM_SYSCOMMAND(hWnd, cmd, x, y, DefWindowProc);
 }
@@ -1592,7 +1598,40 @@ WGLWindow_OnNCLButtonDown(
     if (frame && DwmFrameOnNCButtonDown(frame, hWnd, codeHitTest))
       return;
 
+    /* System-menu icon: DefWindowProc's popup placement assumes a standard
+     * NC caption — track it ourselves at the caption anchor.  Double-click
+     * on the icon closes (native behavior). */
+    if (frame && HTSYSMENU == codeHitTest)
+    {
+      if (fDoubleClick)
+        (void)PostMessage(hWnd, WM_SYSCOMMAND, SC_CLOSE, 0);
+      else
+        DwmFrameShowSystemMenu(frame, hWnd, -1, -1);
+      return;
+    }
+
     FORWARD_WM_NCLBUTTONDOWN(hWnd, fDoubleClick, x, y, codeHitTest, DefWindowProc);
+}
+
+static
+VOID PFORCEINLINE CALLBACK
+WGLWindow_OnNCRButtonUp(
+    HWND hWnd,
+    int  x,
+    int  y,
+    UINT codeHitTest)
+{
+    DWMFRAME* frame = GetDwmFrame(hWnd);
+
+    /* Caption right-click: the system menu at the cursor (canon
+     * WM_NCRBUTTONUP; DefWindowProc's placement assumes a standard NC). */
+    if (frame && (HTCAPTION == codeHitTest || HTSYSMENU == codeHitTest))
+    {
+      DwmFrameShowSystemMenu(frame, hWnd, x, y);
+      return;
+    }
+
+    FORWARD_WM_NCRBUTTONUP(hWnd, x, y, codeHitTest, DefWindowProc);
 }
 
 static
@@ -2028,6 +2067,7 @@ WINWGLWINDOWAPI LRESULT CALLBACK DefWGLWindowProc(HWND hWnd, UINT uMsg, WPARAM w
     HANDLE_MSG(hWnd, WM_NCMOUSELEAVE, WGLWindow_OnNCMouseLeave);
     HANDLE_MSG(hWnd, WM_NCLBUTTONDOWN, WGLWindow_OnNCLButtonDown);
     HANDLE_MSG(hWnd, WM_NCLBUTTONDBLCLK, WGLWindow_OnNCLButtonDown);
+    HANDLE_MSG(hWnd, WM_NCRBUTTONUP, WGLWindow_OnNCRButtonUp);
     HANDLE_MSG(hWnd, WM_MOUSEMOVE, WGLWindow_OnMouseMove);
     HANDLE_MSG(hWnd, WM_LBUTTONUP, WGLWindow_OnLButtonUp);
     HANDLE_MSG(hWnd, WM_CAPTURECHANGED, WGLWindow_OnCaptureChanged);

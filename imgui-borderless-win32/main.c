@@ -164,6 +164,19 @@ static void draw(HWND hWnd)
   PresentWGLWindow(hWnd);
 }
 
+/* Light/dark caption-button commit (dwmframe theme seam): flip the imgui
+ * style to match the chrome.  Colors only — sizes/scales stay. */
+static void WINAPI ApplyImGuiTheme(HWND hWnd, BOOL fDark)
+{
+    ImGuiStyle* style = ImGui_GetStyle();
+
+    UNREFERENCED_PARAMETER(hWnd);
+    if (fDark)
+      ImGui_StyleColorsDark(style);
+    else
+      ImGui_StyleColorsLight(style);
+}
+
 static void __stdcall render(HWND hWnd)
 {
     HDC hdc = BeginWGLWindowPaint(hWnd);
@@ -343,6 +356,9 @@ wWinMain(
     int quit = 0;
 
     SubclassWindow(hwnd, ImGuiSubclassProc);
+
+    if (pwglSurf->frame)
+      DwmFrameSetThemeCallback(pwglSurf->frame, ApplyImGuiTheme);
 
     g_ClientRenderFunction = draw;
 

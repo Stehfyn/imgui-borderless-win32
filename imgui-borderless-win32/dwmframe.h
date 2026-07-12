@@ -38,6 +38,12 @@ typedef struct DWMFRAME DWMFRAME;
 DWMFRAME* WINAPI DwmFrameCreate(HWND hwnd);
 VOID WINAPI DwmFrameDestroy(DWMFRAME* f);
 
+/* Theme seam (dwmframex's pfnToggle): called on the light/dark caption
+ * button commit, AFTER the chrome crossfade starts, with the new dark
+ * state — the app flips its own theme (imgui style) here. */
+typedef VOID (WINAPI* DWMFRAMETHEMEPROC)(HWND hwnd, BOOL fDark);
+VOID WINAPI DwmFrameSetThemeCallback(DWMFRAME* f, DWMFRAMETHEMEPROC pfnTheme);
+
 /* Draws the caption chrome with OpenGL into the current GL context's draw
  * buffer, in window coordinates, over the (cx, cy) client-sized frame.  Call
  * after the client content is rendered, before the present. */
@@ -86,6 +92,13 @@ VOID WINAPI DwmFrameOnCaptureChanged(DWMFRAME* f, HWND hwnd);
  * subclass must route WM_MOUSEMOVE/WM_LBUTTONUP/WM_CAPTURECHANGED straight
  * to the window control then. */
 BOOL WINAPI DwmFrameButtonPressActive(DWMFRAME* f);
+
+/* Tracks the window's system menu at (xScreen, yScreen) — or, when both are
+ * -1, anchored to the caption's bottom-left (icon click / Alt+Space) — with
+ * DefWindowProc-equivalent item states, and posts the chosen WM_SYSCOMMAND.
+ * DefWindowProc's own placement assumes a standard nonclient caption this
+ * window doesn't have. */
+VOID WINAPI DwmFrameShowSystemMenu(DWMFRAME* f, HWND hwnd, int xScreen, int yScreen);
 
 #ifdef __cplusplus
 }

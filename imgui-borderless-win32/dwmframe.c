@@ -80,6 +80,7 @@ typedef struct DWFTEX   { GLuint id; int w; int h; } DWFTEX;
 struct DWMFRAME
 {
     HWND     hwnd;
+    DWMFRAMETHEMEPROC pfnTheme;   /* app theme flip on the light/dark commit */
     BOOL     fIconTried;
     BOOL     fFirstActivate;
     int      idHot;
@@ -238,20 +239,26 @@ static void DwfApplyDwmFrame(HWND hwnd)
     }
     if (g_dwfExtend)
     {
-      /* melak47/BorderlessWindow borderless_shadow, verbatim: {1,1,1,1} —
-       * a 1px frame extension on ALL FOUR sides turns on the DWM drop
-       * shadow/border for the whole ring; the opaque composed face (client
-       * == window) paints over every extended pixel.  NEVER sheet-of-glass
-       * (-1) margins: they render as a solid backdrop material on Win11. */
+      /* {1,1,1,1}: the 1px all-sides extension that turns on the DWM drop
+       * shadow.  NEVER sheet-of-glass (-1) margins — solid backdrop
+       * material on Win11. */
       m.cxLeft = 1; m.cxRight = 1; m.cyTop = 1; m.cyBottom = 1;
       (void)g_dwfExtend(hwnd, &m);
     }
-    if (g_dwfSetAttr)
+    if (g_dwfBlurBehind)
     {
-      /* Rounded corners + the 1px system border ring, flush on the content
-       * edge (client == window). */
-      UINT corner = DWF_DWMWCP_ROUND;
-      (void)g_dwfSetAttr(hwnd, DWF_DWMWA_WINDOW_CORNER_PREFERENCE, &corner, (DWORD)sizeof(corner));
+      /* Blur-behind with an EMPTY region: suppresses DWM's frame/backdrop
+       * material so the invisible-border strips (window minus client) are
+       * genuinely transparent — the visible face ends at the client.
+       * Without this the strips render as a solid ring. */
+      DWF_BLURBEHIND bb;
+      bb.dwFlags                = DWF_BB_ENABLE | DWF_BB_BLURREGION;
+      bb.fEnable                = TRUE;
+      bb.hRgnBlur               = CreateRectRgn(0, 0, -1, -1);
+      bb.fTransitionOnMaximized = FALSE;
+      (void)g_dwfBlurBehind(hwnd, &bb);
+      if (bb.hRgnBlur)
+        (void)DeleteObject(bb.hRgnBlur);
     }
 }
 
@@ -870,6 +877,26 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
       }
     }
 
+    /* DWM-style 1px window border ring, drawn by us on the CONTENT edges —
+     * the DWMWA border/corner attributes ring the WINDOW rect, one
+     * invisible strip outside the visible face.  Win11's border gray,
+     * dimmed when inactive, riding the same activation crossfade.  Skipped
+     * maximized (native maximized windows draw no ring). */
+    if (!IsZoomed(hwnd))
+    {
+      DWFCOLOR ring;
+      float    aTo   = fActive ? 0.55f : 0.30f;
+      float    aFrom = (f->fAnim ? f->fActiveFrom : fActive) ? 0.55f : 0.30f;
+      float    t     = f->fAnim ? f->flAnimT : 1.0f;
+
+      ring   = DwfColor(RGB(0x75, 0x75, 0x75));
+      ring.a = aFrom + (aTo - aFrom) * t;
+      DwfFillRectGL(0.0f,            0.0f,            (float)cx,       1.0f,       ring);   /* top    */
+      DwfFillRectGL(0.0f,            (float)(cy - 1), (float)cx,       (float)cy,  ring);   /* bottom */
+      DwfFillRectGL(0.0f,            0.0f,            1.0f,            (float)cy,  ring);   /* left   */
+      DwfFillRectGL((float)(cx - 1), 0.0f,            (float)cx,       (float)cy,  ring);   /* right  */
+    }
+
     glMatrixMode(GL_MODELVIEW);
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -922,24 +949,32 @@ VOID WINAPI DwmFrameDestroy(DWMFRAME* f)
 
 UINT WINAPI DwmFrameNCCalcSize(HWND hwnd, BOOL fCalcValidRects, NCCALCSIZE_PARAMS* lpcsp)
 {
-    if (!fCalcValidRects)
-      return 0;
+    LONG top;
 
-    /* The borderless invariants (melak47/BorderlessWindow;
-     * BorderlessWindow32 "the two lines that matter"): CLIENT == WINDOW —
-     * rgrc[1] = rgrc[2] ("lie to dwm"), and when maximized clamp the client
-     * to the monitor WORK AREA so the window doesn't bleed under the
-     * taskbar.  Nothing else.  The resize ring synthesizes INSIDE the
-     * client edges (DwmFrameHitTest); the shadow comes from the
-     * DwmExtendFrameIntoClientArea{1,1,1,1} dressing the content paints
-     * over. */
-    lpcsp->rgrc[1] = lpcsp->rgrc[2];
+    /* Invisible-border topology, with the system TOLD about the frame: the
+     * standard NC is computed by DEFWINDOWPROC — USER/DWM then classify the
+     * left/right/bottom strips as real invisible resize borders, so
+     * DWMWA_EXTENDED_FRAME_BOUNDS excludes them and snap zones / shadow /
+     * peek align to the VISIBLE face (hand-added insets are anonymous NC
+     * the system cannot attribute — snap gaps).  Only the top is restored:
+     * caption + top border become client (our chrome; the top resize band
+     * rides inside via the hit test).  Maximized, the client is the monitor
+     * work area EXACTLY (pairs with DwmFrameGetMinMaxInfo).  rgrc[1] =
+     * rgrc[2] is the "lie to dwm", applied AFTER DefWindowProc rewrites the
+     * valid rects. */
+    if (!fCalcValidRects)
+      return (UINT)DefWindowProcW(hwnd, WM_NCCALCSIZE, FALSE, (LPARAM)lpcsp);
+
+    top = lpcsp->rgrc[0].top;
+    (void)DefWindowProcW(hwnd, WM_NCCALCSIZE, TRUE, (LPARAM)lpcsp);
+    lpcsp->rgrc[0].top = top;
     if (IsZoomed(hwnd))
     {
       MONITORINFO mi = { sizeof(mi) };
       if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
         lpcsp->rgrc[0] = mi.rcWork;
     }
+    lpcsp->rgrc[1] = lpcsp->rgrc[2];
     return 0;
 }
 
@@ -952,13 +987,18 @@ VOID WINAPI DwmFrameGetMinMaxInfo(HWND hwnd, MINMAXINFO* lpMinMaxInfo)
     MONITORINFO   mi  = { sizeof(mi) };
 
     /* Min track keeps the caption anatomy intact — icon slot + the four
-     * buttons; client == window, no border terms.  Maximize and max track
-     * are EXACTLY the nearest monitor's work area at its work origin. */
-    dpi          = DwfDpi(hwnd);
-    button_width = MulDiv(47, (int)dpi, 96);
-    caption      = (int)DwmFrameCaptionHeight(hwnd);
-    lpMinMaxInfo->ptMinTrackSize.x = caption + 4 * button_width;
-    lpMinMaxInfo->ptMinTrackSize.y = caption;
+     * buttons + the invisible left/right strips; height = caption + the
+     * bottom strip.  Maximize and max track are EXACTLY the nearest
+     * monitor's work area at its work origin. */
+    {
+      SIZE border;
+      DwfWindowBorders(hwnd, &border);
+      dpi          = DwfDpi(hwnd);
+      button_width = MulDiv(47, (int)dpi, 96);
+      caption      = (int)DwmFrameCaptionHeight(hwnd);
+      lpMinMaxInfo->ptMinTrackSize.x = caption + 4 * button_width + 2 * border.cx;
+      lpMinMaxInfo->ptMinTrackSize.y = caption + border.cy;
+    }
 
     /* Mid move-size loop: leave the max fields alone (reference behavior). */
     if (GetGUIThreadInfo(GetCurrentThreadId(), &gti) && gti.hwndMoveSize == hwnd)
@@ -1007,20 +1047,20 @@ UINT WINAPI DwmFrameHitTest(DWMFRAME* f, HWND hwnd, int x, int y)
      * INSIDE the client edges. */
     if (fSizable)
     {
-      /* Client == window (melak47 borderless_hit_test shape): the whole
-       * ring lives INSIDE the client edges, one frame metric thick (8px at
-       * 96dpi).  Corners: within an edge band the corner zone reaches 2x
-       * the metric ALONG the edge (a border-square corner is too small a
-       * target). */
+      /* Invisible-border ring: left/right/bottom live OUTSIDE the client
+       * (the NCCALCSIZE strips — pt.x < 0 / pt.x >= client.right /
+       * pt.y >= client.bottom); only the top band rides INSIDE.  Corners:
+       * within an edge band the corner zone reaches 2x the metric ALONG the
+       * edge. */
       int reachX = border.cx * 2;
       int reachY = border.cy * 2;
 
       row = 1;
       col = 1;
       if (pt.y < border.cy)                        row = 0;
-      else if (pt.y >= client.bottom - border.cy)  row = 2;
-      if (pt.x < border.cx)                        col = 0;
-      else if (pt.x >= client.right - border.cx)   col = 2;
+      else if (pt.y >= client.bottom)              row = 2;
+      if (pt.x < 0)                                col = 0;
+      else if (pt.x >= client.right)               col = 2;
 
       if (row != 1 && col == 1)
       {
@@ -1143,7 +1183,11 @@ static void DwfButtonAction(DWMFRAME* f, HWND hwnd, int id)
     case DWB_MIN:       (void)PostMessageW(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0); break;
     case DWB_MAX:       (void)PostMessageW(hwnd, WM_SYSCOMMAND, IsZoomed(hwnd) ? SC_RESTORE : SC_MAXIMIZE, 0); break;
     case DWB_CLOSE:     (void)PostMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0); break;
-    case DWB_LIGHTDARK: DwfBeginTransition(f, hwnd, !f->fDark, f->fWndActive); break;
+    case DWB_LIGHTDARK:
+      DwfBeginTransition(f, hwnd, !f->fDark, f->fWndActive);
+      if (f->pfnTheme)
+        f->pfnTheme(hwnd, f->fDark);   /* fDark already flipped by the transition */
+      break;
     default:            break;
     }
 }
@@ -1151,6 +1195,59 @@ static void DwfButtonAction(DWMFRAME* f, HWND hwnd, int id)
 BOOL WINAPI DwmFrameButtonPressActive(DWMFRAME* f)
 {
     return f && f->fCapturing;
+}
+
+VOID WINAPI DwmFrameSetThemeCallback(DWMFRAME* f, DWMFRAMETHEMEPROC pfnTheme)
+{
+    if (f)
+      f->pfnTheme = pfnTheme;
+}
+
+VOID WINAPI DwmFrameShowSystemMenu(DWMFRAME* f, HWND hwnd, int xScreen, int yScreen)
+{
+    HMENU menu;
+    BOOL  fZoomed;
+    UINT  cmd;
+
+    UNREFERENCED_PARAMETER(f);
+
+    menu = GetSystemMenu(hwnd, FALSE);
+    if (!menu)
+      return;
+
+    if (xScreen == -1 && yScreen == -1)
+    {
+      /* Anchor below the caption, inset one frame border from the window's
+       * left edge (native icon-click / Alt+Space placement). */
+      RECT rc;
+      SIZE border;
+      if (GetWindowRect(hwnd, &rc))
+      {
+        DwfWindowBorders(hwnd, &border);
+        xScreen = rc.left + border.cx;
+        yScreen = rc.top + (int)DwmFrameCaptionHeight(hwnd);
+      }
+      else
+      {
+        xScreen = 0;
+        yScreen = 0;
+      }
+    }
+
+    /* DefWindowProc-equivalent item states. */
+    fZoomed = IsZoomed(hwnd);
+    (void)EnableMenuItem(menu, SC_RESTORE,  MF_BYCOMMAND | (fZoomed ? MF_ENABLED : MF_GRAYED));
+    (void)EnableMenuItem(menu, SC_MOVE,     MF_BYCOMMAND | (fZoomed ? MF_GRAYED : MF_ENABLED));
+    (void)EnableMenuItem(menu, SC_SIZE,     MF_BYCOMMAND | (fZoomed ? MF_GRAYED : MF_ENABLED));
+    (void)EnableMenuItem(menu, SC_MAXIMIZE, MF_BYCOMMAND | (fZoomed ? MF_GRAYED : MF_ENABLED));
+    (void)EnableMenuItem(menu, SC_MINIMIZE, MF_BYCOMMAND | MF_ENABLED);
+    (void)EnableMenuItem(menu, SC_CLOSE,    MF_BYCOMMAND | MF_ENABLED);
+    (void)SetMenuDefaultItem(menu, SC_CLOSE, FALSE);
+
+    cmd = (UINT)TrackPopupMenuEx(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+                                 xScreen, yScreen, hwnd, NULL);
+    if (cmd)
+      (void)PostMessageW(hwnd, WM_SYSCOMMAND, (WPARAM)cmd, 0);
 }
 
 VOID WINAPI DwmFrameOnNCActivate(DWMFRAME* f, HWND hwnd, BOOL fActive)
