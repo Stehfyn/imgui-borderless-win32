@@ -167,9 +167,11 @@ static DWFCOLOR DwfGlyphColor(BOOL fDark, BOOL fActive)
 
 static DWFCOLOR DwfCaptionColor(BOOL fDark, BOOL fActive)
 {
+    /* Native uDWM band colors (measured off live captions, 2026-07-12):
+     * dark active is PURE BLACK, dark inactive 0x2B2B2B. */
     COLORREF cr;
     if (fDark)
-      cr = fActive ? RGB(0x20, 0x20, 0x20) : RGB(0x2B, 0x2B, 0x2B);
+      cr = fActive ? RGB(0x00, 0x00, 0x00) : RGB(0x2B, 0x2B, 0x2B);
     else
       cr = fActive ? RGB(0xF3, 0xF3, 0xF3) : RGB(0xFB, 0xFB, 0xFB);
     return DwfColor(cr);
