@@ -25,24 +25,8 @@
 #pragma comment (lib, "glu32")
 #pragma comment (lib, "Comctl32")
 
-typedef void(__cdecl *RenderFunction)(HWND hWnd);
 typedef BOOL(WINAPI* PFNWGLSWAPINTERVALEXTPROC) (int interval);
 PFNWGLSWAPINTERVALEXTPROC      wglSwapIntervalEXT;
-
-static RenderFunction g_ClientRenderFunction;
-
-// Data stored per platform window
-typedef struct WGL_WindowData
-{
-    HDC   hDC;
-    HGLRC hRC;
-} WGL_WindowData;
-
-// Data
-static HGLRC            g_hRC;
-static WGL_WindowData   g_MainWindow;
-static HWND             g_MainHwnd;
-static LPVOID           g_MainFiber;
 
 static void ThemeAnimTick(HWND hWnd);
 
@@ -138,8 +122,10 @@ static void draw(HWND hWnd)
         sync_resize_hwnd = NULL;
     ImGui_ImplWGLWindow_RenderPlatformWindows(sync_resize_hwnd);
 
-    // Restore the OpenGL rendering context to the main window DC, since platform windows might have changed it.
-    wglMakeCurrent(g_MainWindow.hDC, g_hRC);
+    // Restore the OpenGL rendering context to the main window's pbuffer,
+    // since platform windows changed it.
+    if (pwglSurfFrame)
+      wglMakeCurrent(pwglSurfFrame->pbdc, pwglSurfFrame->pbrc);
   }
 
   /* No SwapBuffers: the pbuffer is never displayed by GL, and swapping it
@@ -206,19 +192,6 @@ static void ThemeAnimTick(HWND hWnd)
     }
 }
 
-static void __stdcall render(HWND hWnd)
-{
-    HDC hdc = BeginWGLWindowPaint(hWnd);
-
-    if (g_ClientRenderFunction)
-    {
-      g_ClientRenderFunction(hWnd);
-      //DwmFlush();
-    }
-
-    EndWGLWindowPaint(hdc);
-}
-
 static LRESULT CALLBACK ImGuiSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 static LRESULT CALLBACK ImGuiSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -277,8 +250,8 @@ wWinMain(
     SetWindowCompositionAttribute = (PFN_SET_WINDOW_COMPOSITION_ATTRIBUTE)GetProcAddress(GetModuleHandle(TEXT("user32.dll")), "SetWindowCompositionAttribute");
     
     InitWGLControls();
-    g_MainFiber = ConvertThreadToFiber(NULL);
-    LPVOID hMsgFiber = CreateFiber(0, MessageFiberProc, g_MainFiber);
+    LPVOID main_fiber = ConvertThreadToFiber(NULL);
+    LPVOID hMsgFiber = CreateFiber(0, MessageFiberProc, main_fiber);
 
     /* Canonical immersive-window creation (reference verbatim):
      * WS_EX_NOREDIRECTIONBITMAP + BCS_WINDOW.  NO WS_CAPTION — with it, DWM
@@ -290,14 +263,11 @@ wWinMain(
     HWND hwnd = WGLWindow_CreateEx(WS_EX_NOREDIRECTIONBITMAP, TEXT("WGLWindow"), 0, 0,
       BCS_WINDOW,
       CW_USEDEFAULT, CW_USEDEFAULT, 1080, 720, GetModuleHandle(NULL),
-      g_MainFiber);
-    g_MainHwnd = hwnd;
+      main_fiber);
 
     WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hwnd, 0);
-
-    g_hRC = pwglSurf->pbrc;
-    g_MainWindow.hDC = pwglSurf->pbdc;
-    g_MainWindow.hRC = g_hRC;
+    HDC   main_dc = pwglSurf->pbdc;
+    HGLRC main_rc = pwglSurf->pbrc;
 
     CIMGUI_CHECKVERSION();
     ImGuiContext* ctx = ImGui_CreateContext(NULL);
@@ -320,17 +290,15 @@ wWinMain(
     cImGui_ImplWin32_EnableDpiAwareness();
 
     if (io->ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-        ImGui_ImplWGLWindow_Init(hwnd, g_MainFiber);
+        ImGui_ImplWGLWindow_Init(hwnd, main_fiber);
     int quit = 0;
 
     SubclassWindow(hwnd, ImGuiSubclassProc);
 
-    g_ClientRenderFunction = draw;
-
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
     D3DKMT_WAITFORVERTICALBLANKEVENT vbe;
-    D3DKMTInitVerticalBlankEvent(g_MainWindow.hDC, &vbe);
+    D3DKMTInitVerticalBlankEvent(main_dc, &vbe);
     for(;;)
     {
         SwitchToFiber(hMsgFiber);
@@ -349,7 +317,7 @@ wWinMain(
      * platform windows FIRST (through this module's handlers, renderer and
      * shared GL context still alive), then this module, then the input
      * backend, then the context. */
-    wglMakeCurrent(g_MainWindow.hDC, g_hRC);
+    wglMakeCurrent(main_dc, main_rc);
     cImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplWGLWindow_Shutdown();
     cImGui_ImplWin32_Shutdown();

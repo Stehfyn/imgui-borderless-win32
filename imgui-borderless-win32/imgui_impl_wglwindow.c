@@ -120,6 +120,8 @@ static void ImGui_ImplWGLWindow_AdjustWindowRect(ImGuiViewport* viewport, RECT* 
 {
     UNREFERENCED_PARAMETER(style);
     UNREFERENCED_PARAMETER(ex_style);
+    if (viewport == ImGui_GetMainViewport())
+        return;
     if (!(viewport->Flags & ImGuiViewportFlags_NoDecoration))
     {
         ImGui_ImplWGLWindow_ViewportData* vd = ImGui_ImplWGLWindow_GetViewportData(viewport);
@@ -286,20 +288,32 @@ static void ImGui_ImplWGLWindow_UpdateWindow(ImGuiViewport* viewport)
     }
 }
 
+/* The caption-band inset applies to SECONDARY decorated viewports only:
+ * their viewport is the content area below the band.  The MAIN viewport
+ * spans the whole client — its band is handled through the work-area inset
+ * (BuildWorkInsetMin), so offsetting its origin would shift the entire
+ * coordinate system (hit tests, overlays) by the caption height. */
+static LONG ImGui_ImplWGLWindow_GetChromeInset(ImGuiViewport* viewport, HWND hwnd)
+{
+    WGLSURFACE* surface;
+
+    if (!hwnd || viewport == ImGui_GetMainViewport())
+        return 0;
+    surface = (WGLSURFACE*)GetWindowLongPtr(hwnd, 0);
+    return (surface && surface->frame) ? (LONG)DwmFrameCaptionHeight(hwnd) : 0;
+}
+
 static void ImGui_ImplWGLWindow_GetWindowPos(ImGuiViewport* viewport, ImVec2* out_pos)
 {
     HWND hwnd = ImGui_ImplWGLWindow_GetHwndFromViewport(viewport);
-    WGLSURFACE* surface = hwnd ? (WGLSURFACE*)GetWindowLongPtr(hwnd, 0) : NULL;
     POINT pos = { 0, 0 };
 
     out_pos->x = 0.0f;
     out_pos->y = 0.0f;
     if (hwnd && ClientToScreen(hwnd, &pos))
     {
-        /* Content origin: below the composed caption band on decorated
-         * windows (the band lives inside the client — seam 1). */
         out_pos->x = (float)pos.x;
-        out_pos->y = (float)(pos.y + (surface && surface->frame ? (LONG)DwmFrameCaptionHeight(hwnd) : 0));
+        out_pos->y = (float)(pos.y + ImGui_ImplWGLWindow_GetChromeInset(viewport, hwnd));
     }
 }
 
@@ -338,18 +352,16 @@ static void ImGui_ImplWGLWindow_SetWindowPos(ImGuiViewport* viewport, ImVec2 pos
 static void ImGui_ImplWGLWindow_GetWindowSize(ImGuiViewport* viewport, ImVec2* out_size)
 {
     HWND hwnd = ImGui_ImplWGLWindow_GetHwndFromViewport(viewport);
-    WGLSURFACE* surface = hwnd ? (WGLSURFACE*)GetWindowLongPtr(hwnd, 0) : NULL;
     SIZE size;
 
     out_size->x = 0.0f;
     out_size->y = 0.0f;
     /* Driven size (pending rgrc[0] during the pre-geometry repaint, live
-     * client otherwise), minus the composed caption band on decorated
-     * windows — the viewport is the CONTENT area (seam 1). */
+     * client otherwise), minus the composed caption band on secondary
+     * decorated windows — their viewport is the CONTENT area (seam 1). */
     if (hwnd && GetWGLWindowDrivenClientSize(hwnd, &size))
     {
-        if (surface && surface->frame)
-            size.cy -= (LONG)DwmFrameCaptionHeight(hwnd);
+        size.cy -= ImGui_ImplWGLWindow_GetChromeInset(viewport, hwnd);
         if (size.cy < 1)
             size.cy = 1;
         out_size->x = (float)size.cx;
