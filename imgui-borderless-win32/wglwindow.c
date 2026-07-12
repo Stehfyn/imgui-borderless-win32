@@ -4,9 +4,11 @@
 
 #include <windowsx.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 #include <GL/gl.h>
 
 #pragma comment (lib, "dwmapi")
+#pragma comment (lib, "uxtheme")
 #pragma comment(lib, "ntdll")
 
 #define EXIT_SUCCESS 0L
@@ -1289,6 +1291,19 @@ WGLWindow_OnNCCreate(
         BOOL allow_ncpaint = FALSE;
         EnableNonClientDpiScaling(hWnd);
         DwmSetWindowAttribute(hWnd, DWMWA_ALLOW_NCPAINT_VALUE, &allow_ncpaint, sizeof(allow_ncpaint));
+
+        /* Dissociate the window from uxtheme.  DWM nonclient rendering goes
+         * OFF for this window once the composed content attaches
+         * (WM_DWMNCRENDERINGCHANGED), and uxtheme treats a THEMED
+         * WS_CAPTION window without DWM NC rendering as a classic-framed
+         * caption window: its DefWindowProc hooks re-apply the Luna
+         * rounded-top caption region (top corners round, bottom square,
+         * region in unscaled NC coords) behind virtually every forwarded
+         * message — unbeatable by message-level SetWindowRgn(NULL) games.
+         * With no theme association the hook has no theme data and never
+         * computes a region (measured, ncrtest 2026-07-12).  The window
+         * draws all of its own UI, so it loses nothing. */
+        SetWindowTheme(hWnd, L" ", L" ");
 
         pwglSurf->dxgi = DxgiPresent_Create(hWnd);
         if (!pwglSurf->dxgi)
