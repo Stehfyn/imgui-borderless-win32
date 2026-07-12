@@ -55,6 +55,7 @@ static void (*g_Win32_Platform_DestroyWindow)(ImGuiViewport* viewport);
 static void (*g_OpenGL_Renderer_RenderWindow)(ImGuiViewport* viewport, void* user_data);
 
 static void Hook_RenderPlatformWindows(HWND priority_hwnd);
+static void ThemeAnimTick(void);
 
 static void draw(HWND hWnd)
 {
@@ -69,6 +70,7 @@ static void draw(HWND hWnd)
   if (pwglSurfFrame)
     pwglSurfFrame->in_frame = TRUE;
 
+  ThemeAnimTick();
   cImGui_ImplOpenGL3_NewFrame();
   cImGui_ImplWin32_NewFrame();
 
@@ -164,17 +166,68 @@ static void draw(HWND hWnd)
   PresentWGLWindow(hWnd);
 }
 
-/* Light/dark caption-button commit (dwmframe theme seam): flip the imgui
- * style to match the chrome.  Colors only — sizes/scales stay. */
+/* Light/dark caption-button commit (dwmframe theme seam): don't snap the
+ * imgui style — crossfade it on the SAME timeline as the chrome (dwmframe's
+ * 160ms linear caption fade starts on this same tick), so the content always
+ * matches the caption mid-transition.  Colors only — sizes/scales stay. */
+#define THEME_ANIM_DURATION 160u   /* dwmframe DWF_ANIM_DURATION */
+
+static struct
+{
+    BOOL   fActive;
+    DWORD  dwStart;
+    ImVec4 from[ImGuiCol_COUNT];
+    ImVec4 to[ImGuiCol_COUNT];
+} g_ThemeAnim;
+
 static void WINAPI ApplyImGuiTheme(HWND hWnd, BOOL fDark)
 {
+    static ImGuiStyle target;   /* colors fully overwritten below; off-stack (large) */
     ImGuiStyle* style = ImGui_GetStyle();
+    int i;
 
     UNREFERENCED_PARAMETER(hWnd);
     if (fDark)
-      ImGui_StyleColorsDark(style);
+      ImGui_StyleColorsDark(&target);
     else
-      ImGui_StyleColorsLight(style);
+      ImGui_StyleColorsLight(&target);
+
+    /* From the LIVE colors: a mid-fade re-press reverses smoothly, exactly
+     * like the chrome's crossfade. */
+    for (i = 0; i < ImGuiCol_COUNT; ++i)
+    {
+      g_ThemeAnim.from[i] = style->Colors[i];
+      g_ThemeAnim.to[i]   = target.Colors[i];
+    }
+    g_ThemeAnim.dwStart = GetTickCount();
+    g_ThemeAnim.fActive = TRUE;
+}
+
+/* Per-frame: advance the style crossfade (linear, like dwmframe's). */
+static void ThemeAnimTick(void)
+{
+    ImGuiStyle* style;
+    float t;
+    int   i;
+
+    if (!g_ThemeAnim.fActive)
+      return;
+
+    t = (float)(GetTickCount() - g_ThemeAnim.dwStart) / (float)THEME_ANIM_DURATION;
+    if (t >= 1.0f)
+    {
+      t = 1.0f;
+      g_ThemeAnim.fActive = FALSE;
+    }
+
+    style = ImGui_GetStyle();
+    for (i = 0; i < ImGuiCol_COUNT; ++i)
+    {
+      style->Colors[i].x = g_ThemeAnim.from[i].x + (g_ThemeAnim.to[i].x - g_ThemeAnim.from[i].x) * t;
+      style->Colors[i].y = g_ThemeAnim.from[i].y + (g_ThemeAnim.to[i].y - g_ThemeAnim.from[i].y) * t;
+      style->Colors[i].z = g_ThemeAnim.from[i].z + (g_ThemeAnim.to[i].z - g_ThemeAnim.from[i].z) * t;
+      style->Colors[i].w = g_ThemeAnim.from[i].w + (g_ThemeAnim.to[i].w - g_ThemeAnim.from[i].w) * t;
+    }
 }
 
 static void __stdcall render(HWND hWnd)
