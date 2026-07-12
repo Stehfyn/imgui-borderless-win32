@@ -41,8 +41,10 @@ enum DWF_BTN { DWB_NONE = 0, DWB_LIGHTDARK, DWB_MIN, DWB_MAX, DWB_CLOSE };
 enum DWF_GLYPH { DWFG_SUN, DWFG_MOON, DWFG_MIN, DWFG_MAX, DWFG_RESTORE, DWFG_CLOSE, DWFG_COUNT };
 static const WCHAR c_dwfGlyphCp[DWFG_COUNT] = { 0xE706, 0xE708, 0xE921, 0xE922, 0xE923, 0xE8BB };
 
-#define DWF_DWMWA_WINDOW_CORNER_PREFERENCE 33
-#define DWF_DWMWCP_ROUND                   2
+/* Glyph masks rasterize at 4x and draw at 1:1 scale-down: GDI grayscale AA
+ * at caption-glyph sizes (~13px symbol font) has too few coverage levels —
+ * visible quantization; the supersample restores smooth edges. */
+#define DWF_GLYPH_SS 4
 
 typedef struct DWF_MARGINS { int cxLeft; int cxRight; int cyTop; int cyBottom; } DWF_MARGINS;
 typedef struct DWF_BLURBEHIND
@@ -193,21 +195,20 @@ static int DwfButtonRects(HWND hwnd, int cxClient, RECT* prcClose, RECT* prcMax,
     return 1;
 }
 
-/* Re-enable the DWM-drawn frame the NC removal stripped.  THIS window shape
- * (WS_EX_NOREDIRECTIONBITMAP, BCS_WINDOW without WS_CAPTION) requires the
- * FULL dressing (user-diagnosed): DwmExtendFrameIntoClientArea with the
- * {1, 1, -1, 1} margins plus blur-behind with an EMPTY region — together
- * they make the window's un-drawn area genuinely transparent, so the visible
- * face ends exactly at the composed content (without blur-behind DWM
- * backdrops the whole window rect; dwmframex's {0,0,1,0} margins fit its
- * caption-demo window shape, not this one).  Plus rounded corners.
- * Idempotent; must be (re-)applied in response to WM_ACTIVATE to settle;
- * dwmapi loaded on first use. */
+/* Re-enable the DWM window dressing the NC removal stripped — the canon's
+ * ApplyWindowDressing, VERBATIM AND NOTHING MORE: DwmExtendFrameIntoClientArea
+ * with the {1, 1, -1, 1} margins plus blur-behind with an EMPTY region.
+ * Together they make the window's un-drawn area genuinely transparent, so
+ * the visible face ends exactly at the composed content (user-diagnosed:
+ * without blur-behind DWM backdrops the whole window rect).  NO corner
+ * preference / border-color attributes: those make DWM draw its border ring
+ * at the WINDOW rect, a visible line floating one border-width outside the
+ * client-anchored content.  Idempotent; must be (re-)applied in response to
+ * WM_ACTIVATE to settle; dwmapi loaded on first use. */
 static void DwfApplyDwmFrame(HWND hwnd)
 {
     union { FARPROC fp; PFN_DWF_EXTEND ex; PFN_DWF_SETATTR sa; PFN_DWF_BLURBEHIND bb; } u;
     DWF_MARGINS m;
-    UINT        corner;
 
     if (!g_dwfDwmapi)
     {
@@ -234,11 +235,6 @@ static void DwfApplyDwmFrame(HWND hwnd)
       (void)g_dwfBlurBehind(hwnd, &bb);
       if (bb.hRgnBlur)
         (void)DeleteObject(bb.hRgnBlur);
-    }
-    if (g_dwfSetAttr)
-    {
-      corner = DWF_DWMWCP_ROUND;
-      (void)g_dwfSetAttr(hwnd, DWF_DWMWA_WINDOW_CORNER_PREFERENCE, &corner, (DWORD)sizeof(corner));
     }
 }
 
@@ -367,8 +363,9 @@ static HFONT DwfCreateCaptionFont(UINT dpi)
 }
 
 /* Icon glyph font: Segoe Fluent Icons (Win11) / Segoe MDL2 Assets (Win10) --
- * the same glyphs uDWM bakes into its button atlas, sized to the caption. */
-static HFONT DwfCreateIconFont(int capH)
+ * the same glyphs uDWM bakes into its button atlas.  pxSize is the exact
+ * pixel size to rasterize at (callers pass the supersampled size). */
+static HFONT DwfCreateIconFont(int pxSize)
 {
     static const WCHAR* faces[2] = { L"Segoe Fluent Icons", L"Segoe MDL2 Assets" };
     HDC   hdc;
@@ -376,7 +373,7 @@ static HFONT DwfCreateIconFont(int capH)
     int   i;
     HFONT hFont;
 
-    size = MulDiv(capH, 36, 100);
+    size = pxSize;
     if (size < 8)
       size = 8;
 
@@ -420,6 +417,8 @@ static void DwfEnsureChromeAssets(DWMFRAME* f, HWND hwnd)
       for (i = 0; i < DWFG_COUNT; ++i)
         DwfFreeTex(&f->texGlyph[i]);
       DwfFreeTex(&f->texTitle);
+      DwfFreeTex(&f->texIcon);
+      f->fIconTried = FALSE;
       f->szTitle[0] = 1;   /* != any real title: forces the re-rasterize below */
       f->szTitle[1] = 0;
       f->assetDpi   = dpi;
@@ -427,7 +426,8 @@ static void DwfEnsureChromeAssets(DWMFRAME* f, HWND hwnd)
 
     if (!f->texGlyph[DWFG_CLOSE].id)
     {
-      HFONT hFont = DwfCreateIconFont(capH);
+      /* Rasterize supersampled; the draw scales down by DWF_GLYPH_SS. */
+      HFONT hFont = DwfCreateIconFont(MulDiv(capH, 36, 100) * DWF_GLYPH_SS);
       if (hFont)
       {
         for (i = 0; i < DWFG_COUNT; ++i)
@@ -454,48 +454,44 @@ static void DwfEnsureChromeAssets(DWMFRAME* f, HWND hwnd)
     }
 }
 
-/* High-res caption icon: the window's big icon rasterized once into a BGRA
- * DIB (straight alpha; GL blending premultiplies at draw time), uploaded as
- * a GL texture (reference DwfEnsureIcon, GL flavor). */
+/* Caption icon: the window's icon rasterized by GDI at EXACTLY the small-
+ * icon metric for the window's dpi (DrawIconEx picks/scales the appropriate
+ * frame), uploaded as a BGRA GL texture drawn 1:1 — a GPU LINEAR downscale
+ * from a 256px frame to ~16px has no mips and shimmers into mush. */
 static void DwfEnsureIcon(DWMFRAME* f, HWND hwnd)
 {
     HICON      hIcon;
-    ICONINFO   ii;
-    BITMAP     bm;
     BITMAPINFO bmi;
     HDC        hdcScreen;
     HDC        hdcMem;
     HBITMAP    hDib;
     HBITMAP    hOld;
     void*      pBits;
-    int        n;
+    UINT       dpi;
+    int        iw;
+    int        ih;
 
     if (f->texIcon.id || f->fIconTried)
       return;
     f->fIconTried = TRUE;
 
-    hIcon = (HICON)SendMessageW(hwnd, WM_GETICON, ICON_BIG, 0);
-    if (!hIcon) hIcon = (HICON)SendMessageW(hwnd, WM_GETICON, ICON_SMALL2, 0);
-    if (!hIcon) hIcon = (HICON)GetClassLongPtrW(hwnd, GCLP_HICON);
+    hIcon = (HICON)SendMessageW(hwnd, WM_GETICON, ICON_SMALL2, 0);
+    if (!hIcon) hIcon = (HICON)SendMessageW(hwnd, WM_GETICON, ICON_BIG, 0);
     if (!hIcon) hIcon = (HICON)GetClassLongPtrW(hwnd, GCLP_HICONSM);
+    if (!hIcon) hIcon = (HICON)GetClassLongPtrW(hwnd, GCLP_HICON);
     if (!hIcon) hIcon = LoadIconW(NULL, IDI_APPLICATION);
     if (!hIcon) return;
 
-    n = 32;
-    ZeroMemory(&ii, sizeof(ii));
-    if (GetIconInfo(hIcon, &ii))
-    {
-      if (ii.hbmColor && (0 != GetObjectW(ii.hbmColor, (int)sizeof(bm), &bm))) n = bm.bmWidth;
-      if (ii.hbmColor) (void)DeleteObject(ii.hbmColor);
-      if (ii.hbmMask)  (void)DeleteObject(ii.hbmMask);
-    }
-    if (n < 16)  n = 16;
-    if (n > 256) n = 256;
+    dpi = DwfDpi(hwnd);
+    iw  = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+    ih  = GetSystemMetricsForDpi(SM_CYSMICON, dpi);
+    if (iw < 8)  iw = 8;
+    if (ih < 8)  ih = 8;
 
     ZeroMemory(&bmi, sizeof(bmi));
     bmi.bmiHeader.biSize        = sizeof(bmi.bmiHeader);
-    bmi.bmiHeader.biWidth       = n;
-    bmi.bmiHeader.biHeight      = -n;           /* top-down */
+    bmi.bmiHeader.biWidth       = iw;
+    bmi.bmiHeader.biHeight      = -ih;          /* top-down */
     bmi.bmiHeader.biPlanes      = 1;
     bmi.bmiHeader.biBitCount    = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -509,8 +505,8 @@ static void DwfEnsureIcon(DWMFRAME* f, HWND hwnd)
     if (hdcMem && hDib && pBits)
     {
       hOld = (HBITMAP)SelectObject(hdcMem, hDib);
-      ZeroMemory(pBits, (SIZE_T)n * (SIZE_T)n * 4u);
-      (void)DrawIconEx(hdcMem, 0, 0, hIcon, n, n, 0u, NULL, DI_NORMAL);
+      ZeroMemory(pBits, (SIZE_T)iw * (SIZE_T)ih * 4u);
+      (void)DrawIconEx(hdcMem, 0, 0, hIcon, iw, ih, 0u, NULL, DI_NORMAL);
       (void)GdiFlush();
       (void)SelectObject(hdcMem, hOld);
 
@@ -523,9 +519,9 @@ static void DwfEnsureIcon(DWMFRAME* f, HWND hwnd)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, n, n, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pBits);
-        f->texIcon.w = n;
-        f->texIcon.h = n;
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, iw, ih, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pBits);
+        f->texIcon.w = iw;
+        f->texIcon.h = ih;
       }
     }
 
@@ -592,9 +588,13 @@ static void DwfDrawButton(DWMFRAME* f, const RECT* prc, int id, const DWFTEX* pG
 
     if (pGlyph && pGlyph->id)
     {
-      float gx = (float)prc->left + (float)((prc->right - prc->left) - pGlyph->w) * 0.5f;
-      float gy = (float)prc->top  + (float)((prc->bottom - prc->top) - pGlyph->h) * 0.5f;
-      DwfDrawTexGL(pGlyph, gx, gy, (float)pGlyph->w, (float)pGlyph->h, cfGlyph);
+      /* Draw at 1/DWF_GLYPH_SS of the supersampled mask, integer-snapped:
+       * half-pixel placement under LINEAR filtering doubles every edge. */
+      int gw = pGlyph->w / DWF_GLYPH_SS;
+      int gh = pGlyph->h / DWF_GLYPH_SS;
+      int gx = prc->left + ((prc->right - prc->left) - gw) / 2;
+      int gy = prc->top  + ((prc->bottom - prc->top) - gh) / 2;
+      DwfDrawTexGL(pGlyph, (float)gx, (float)gy, (float)gw, (float)gh, cfGlyph);
     }
 }
 
@@ -657,23 +657,23 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
      * below it via the viewport work-area inset). */
     DwfFillRectGL(0.0f, 0.0f, (float)cx, (float)capH, colCap);
 
-    /* Caption system icon at the win32kfull DrawCaptionIcon slot. */
+    /* Caption system icon at the win32kfull DrawCaptionIcon slot, 1:1 (the
+     * texture was rasterized at the small-icon metric). */
+    if (f->texIcon.id)
     {
-      UINT dpi = DwfDpi(hwnd);
-      int  iw  = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
-      int  ih  = GetSystemMetricsForDpi(SM_CYSMICON, dpi);
-      int  ix  = (capH - iw) / 2 + 1;
-      int  iy  = (capH - ih) / 2;
+      int ix = (capH - f->texIcon.w) / 2 + 1;
+      int iy = (capH - f->texIcon.h) / 2;
 
-      DwfDrawTexGL(&f->texIcon, (float)ix, (float)iy, (float)iw, (float)ih, colWhite);
+      DwfDrawTexGL(&f->texIcon, (float)ix, (float)iy, (float)f->texIcon.w, (float)f->texIcon.h, colWhite);
     }
 
     /* Caption title (system caption font); starts one caption-height in
-     * (xxxDrawCaptionTemp: rc.left += capH for the icon slot). */
+     * (xxxDrawCaptionTemp: rc.left += capH for the icon slot).  Integer-
+     * snapped: fractional placement under LINEAR filtering blurs the text. */
     if (f->texTitle.id)
     {
-      float ty = (float)(capH - f->texTitle.h) * 0.5f;
-      DwfDrawTexGL(&f->texTitle, (float)capH, ty, (float)f->texTitle.w, (float)f->texTitle.h, colText);
+      int ty = (capH - f->texTitle.h) / 2;
+      DwfDrawTexGL(&f->texTitle, (float)capH, (float)ty, (float)f->texTitle.w, (float)f->texTitle.h, colText);
     }
 
     /* Caption buttons: light/dark, Minimize, Maximize/Restore, Close. */
