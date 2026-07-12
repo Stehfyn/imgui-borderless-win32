@@ -41,6 +41,9 @@ enum DWF_BTN { DWB_NONE = 0, DWB_LIGHTDARK, DWB_MIN, DWB_MAX, DWB_CLOSE };
 enum DWF_GLYPH { DWFG_SUN, DWFG_MOON, DWFG_MIN, DWFG_MAX, DWFG_RESTORE, DWFG_CLOSE, DWFG_COUNT };
 static const WCHAR c_dwfGlyphCp[DWFG_COUNT] = { 0xE706, 0xE708, 0xE921, 0xE922, 0xE923, 0xE8BB };
 
+#define DWF_DWMWA_WINDOW_CORNER_PREFERENCE 33
+#define DWF_DWMWCP_ROUND                   2
+
 /* Glyph masks rasterize at 4x and draw at 1:1 scale-down: GDI grayscale AA
  * at caption-glyph sizes (~13px symbol font) has too few coverage levels —
  * visible quantization; the supersample restores smooth edges. */
@@ -208,19 +211,19 @@ static int DwfButtonRects(HWND hwnd, int cxClient, RECT* prcClose, RECT* prcMax,
     return 1;
 }
 
-/* Re-enable the DWM window dressing the NC removal stripped — the canon's
- * ApplyWindowDressing, VERBATIM AND NOTHING MORE: DwmExtendFrameIntoClientArea
- * with the {1, 1, -1, 1} margins plus blur-behind with an EMPTY region.
- * Together they make the window's un-drawn area genuinely transparent, so
- * the visible face ends exactly at the composed content (user-diagnosed:
- * without blur-behind DWM backdrops the whole window rect).  NO corner
- * preference / border-color attributes: those make DWM draw its border ring
- * at the WINDOW rect, a visible line floating one border-width outside the
- * client-anchored content.  Idempotent; must be (re-)applied in response to
- * WM_ACTIVATE to settle; dwmapi loaded on first use. */
+/* Re-enable the DWM-drawn frame the NC removal stripped, the dwmframex way:
+ * a 1px top sheet-of-glass — the SMALLEST extension that makes DWM render
+ * the drop shadow, the window border, and report
+ * DWMWA_EXTENDED_FRAME_BOUNDS; the opaque composed face (client == window,
+ * alpha forced to 1) paints over the 1px.  The old {1,1,-1,1} + blur-behind
+ * dressing was for content that did NOT cover the window: any -1 margin is
+ * a FULL sheet of glass, which suppresses the standard frame shadow/border
+ * and leaves the window a flat floating slab.  Idempotent; must be (re-)
+ * applied in response to WM_ACTIVATE to settle; dwmapi loaded on first
+ * use. */
 static void DwfApplyDwmFrame(HWND hwnd)
 {
-    union { FARPROC fp; PFN_DWF_EXTEND ex; PFN_DWF_SETATTR sa; PFN_DWF_BLURBEHIND bb; } u;
+    union { FARPROC fp; PFN_DWF_EXTEND ex; PFN_DWF_SETATTR sa; } u;
     DWF_MARGINS m;
 
     if (!g_dwfDwmapi)
@@ -228,26 +231,25 @@ static void DwfApplyDwmFrame(HWND hwnd)
       g_dwfDwmapi = LoadLibraryW(L"dwmapi.dll");
       if (g_dwfDwmapi)
       {
-        u.fp = GetProcAddress(g_dwfDwmapi, "DwmExtendFrameIntoClientArea"); g_dwfExtend     = u.ex;
-        u.fp = GetProcAddress(g_dwfDwmapi, "DwmSetWindowAttribute");        g_dwfSetAttr    = u.sa;
-        u.fp = GetProcAddress(g_dwfDwmapi, "DwmEnableBlurBehindWindow");    g_dwfBlurBehind = u.bb;
+        u.fp = GetProcAddress(g_dwfDwmapi, "DwmExtendFrameIntoClientArea"); g_dwfExtend  = u.ex;
+        u.fp = GetProcAddress(g_dwfDwmapi, "DwmSetWindowAttribute");        g_dwfSetAttr = u.sa;
       }
     }
     if (g_dwfExtend)
     {
-      m.cxLeft = 1; m.cxRight = 1; m.cyTop = -1; m.cyBottom = 1;
+      m.cxLeft = 0; m.cxRight = 0; m.cyTop = 1; m.cyBottom = 0;
       (void)g_dwfExtend(hwnd, &m);
     }
-    if (g_dwfBlurBehind)
+    if (g_dwfSetAttr)
     {
-      DWF_BLURBEHIND bb;
-      bb.dwFlags                = DWF_BB_ENABLE | DWF_BB_BLURREGION;
-      bb.fEnable                = TRUE;
-      bb.hRgnBlur               = CreateRectRgn(0, 0, -1, -1);   /* empty region: no blur, pure transparency */
-      bb.fTransitionOnMaximized = FALSE;
-      (void)g_dwfBlurBehind(hwnd, &bb);
-      if (bb.hRgnBlur)
-        (void)DeleteObject(bb.hRgnBlur);
+      /* Rounded corners + the 1px system border ring.  With client ==
+       * window the ring lands exactly ON the content edge (it floated one
+       * border-width off when the client was inset — the reason this was
+       * once removed).  Without it Win11 rounds only where the extended
+       * frame exists (the 1px top band): top corners round, bottom stay
+       * square, and no border is drawn. */
+      UINT corner = DWF_DWMWCP_ROUND;
+      (void)g_dwfSetAttr(hwnd, DWF_DWMWA_WINDOW_CORNER_PREFERENCE, &corner, (DWORD)sizeof(corner));
     }
 }
 
@@ -918,49 +920,47 @@ VOID WINAPI DwmFrameDestroy(DWMFRAME* f)
 
 UINT WINAPI DwmFrameNCCalcSize(HWND hwnd, BOOL fCalcValidRects, NCCALCSIZE_PARAMS* lpcsp)
 {
-    SIZE border;
-
     if (!fCalcValidRects)
       return 0;
 
-    /* Canon topology (imguiapp_impl_win32_d2ddxgi WM_NCCALCSIZE, verbatim):
-     * rgrc[1] = rgrc[2] is the reference's "lie to dwm" (no stretch/garbage
-     * fill of the grown region); maximized, the client is the monitor work
-     * area EXACTLY (pairs with DwmFrameGetMinMaxInfo); otherwise the
-     * left/right/bottom invisible resize borders sit OUTSIDE the client rect
-     * — the top border rides INSIDE it (the hit test claims it). */
+    /* CLIENT == WINDOW, in every state.  rgrc[1] = rgrc[2] is the
+     * reference's "lie to dwm" (no stretch/garbage fill of the grown
+     * region); maximized, the client is the monitor work area EXACTLY
+     * (pairs with DwmFrameGetMinMaxInfo).  No border insets: the composed
+     * face must fill the window rect — the shell does not expand snap zones
+     * by invisible borders for custom frames, so an inset client shows
+     * gutter gaps against snap boundaries and screen edges.  The whole
+     * resize ring synthesizes INSIDE the client edges (DwmFrameHitTest);
+     * the DWM dressing (DwfApplyDwmFrame: {1,1,-1,1} extend + empty-region
+     * blur-behind) supplies shadow + transparency for whatever the content
+     * does not cover. */
     lpcsp->rgrc[1] = lpcsp->rgrc[2];
     if (IsZoomed(hwnd))
     {
       MONITORINFO mi = { sizeof(mi) };
       if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
         lpcsp->rgrc[0] = mi.rcWork;
-      return 0;
     }
-    DwfWindowBorders(hwnd, &border);
-    lpcsp->rgrc[0].left   += border.cx;
-    lpcsp->rgrc[0].right  -= border.cx;
-    lpcsp->rgrc[0].bottom -= border.cy;
     return 0;
 }
 
 VOID WINAPI DwmFrameGetMinMaxInfo(HWND hwnd, MINMAXINFO* lpMinMaxInfo)
 {
-    SIZE          border;
     UINT          dpi;
     int           button_width;
     int           caption;
     GUITHREADINFO gti = { sizeof(gti) };
     MONITORINFO   mi  = { sizeof(mi) };
 
-    /* Min track keeps the caption anatomy intact; maximize and max track are
-     * EXACTLY the nearest monitor's work area at its work origin. */
-    DwfWindowBorders(hwnd, &border);
+    /* Min track keeps the caption anatomy intact — icon slot (one caption-
+     * height square) + the four buttons; client == window, so no border
+     * terms.  Maximize and max track are EXACTLY the nearest monitor's work
+     * area at its work origin. */
     dpi          = DwfDpi(hwnd);
     button_width = MulDiv(47, (int)dpi, 96);
     caption      = (int)DwmFrameCaptionHeight(hwnd);
-    lpMinMaxInfo->ptMinTrackSize.x = caption + 4 * button_width + 2 * border.cx;
-    lpMinMaxInfo->ptMinTrackSize.y = caption + border.cy;
+    lpMinMaxInfo->ptMinTrackSize.x = caption + 4 * button_width;
+    lpMinMaxInfo->ptMinTrackSize.y = caption;
 
     /* Mid move-size loop: leave the max fields alone (reference behavior). */
     if (GetGUIThreadInfo(GetCurrentThreadId(), &gti) && gti.hwndMoveSize == hwnd)
@@ -997,39 +997,24 @@ UINT WINAPI DwmFrameHitTest(DWMFRAME* f, HWND hwnd, int x, int y)
     pt.y = y;
     ScreenToClient(hwnd, &pt);
     GetClientRect(hwnd, &client);
+    DwfWindowBorders(hwnd, &border);
     capH     = (int)DwmFrameCaptionHeight(hwnd);
     style    = GetWindowLongPtr(hwnd, GWL_STYLE);
     fSizable = (0 != (style & WS_THICKFRAME)) && !IsZoomed(hwnd);
 
-    /* Caption buttons first (the canon's chrome-hittest callback layer). */
-    if (DwfButtonRects(hwnd, (int)client.right, &rcClose, &rcMax, &rcMin, &rcLD))
-    {
-      if (PtInRect(&rcLD, pt))    return HTLIGHTDARKBTN;
-      if (PtInRect(&rcMin, pt))   return HTMINBUTTON;
-      if (PtInRect(&rcMax, pt))   return HTMAXBUTTON;
-      if (PtInRect(&rcClose, pt)) return HTCLOSE;
-    }
-
-    rcIcon.left   = 0;
-    rcIcon.top    = 0;
-    rcIcon.right  = capH;
-    rcIcon.bottom = capH;
-    if (PtInRect(&rcIcon, pt))
-      return HTSYSMENU;
-
+    /* RESIZE RING FIRST (native Win11 precedence: the top band wins over
+     * the caption buttons — hovering the very top of Close on any native
+     * window gives the resize arrow; buttons checked first make the
+     * top-right corner unreachable).  Client == window: the ring lives
+     * INSIDE the client edges. */
     if (fSizable)
     {
-      /* Canon ring (imguiapp DefaultNCHitTest, verbatim): the left/right/
-       * bottom borders sit OUTSIDE the client rect (WM_NCCALCSIZE insets
-       * them, so they land here as pt.x < 0 / pt.x >= client.right /
-       * pt.y >= client.bottom); only the top border rides INSIDE. */
-      DwfWindowBorders(hwnd, &border);
       row = 1;
       col = 1;
-      if (pt.y < border.cy)              row = 0;
-      else if (pt.y >= client.bottom)    row = 2;
-      if (pt.x < 0)                      col = 0;
-      else if (pt.x >= client.right)     col = 2;
+      if (pt.y < border.cy)                        row = 0;
+      else if (pt.y >= client.bottom - border.cy)  row = 2;
+      if (pt.x < border.cx)                        col = 0;
+      else if (pt.x >= client.right - border.cx)   col = 2;
 
       if (0 == row)
       {
@@ -1046,6 +1031,23 @@ UINT WINAPI DwmFrameHitTest(DWMFRAME* f, HWND hwnd, int x, int y)
       if (0 == col) return HTLEFT;
       if (2 == col) return HTRIGHT;
     }
+
+    /* Caption buttons, then the system-menu icon slot (inset past the left
+     * ring band, one small-icon wide), then the caption strip. */
+    if (DwfButtonRects(hwnd, (int)client.right, &rcClose, &rcMax, &rcMin, &rcLD))
+    {
+      if (PtInRect(&rcLD, pt))    return HTLIGHTDARKBTN;
+      if (PtInRect(&rcMin, pt))   return HTMINBUTTON;
+      if (PtInRect(&rcMax, pt))   return HTMAXBUTTON;
+      if (PtInRect(&rcClose, pt)) return HTCLOSE;
+    }
+
+    rcIcon.left   = border.cx;
+    rcIcon.top    = border.cy;
+    rcIcon.right  = border.cx + GetSystemMetricsForDpi(SM_CXSMICON, DwfDpi(hwnd));
+    rcIcon.bottom = capH;
+    if (PtInRect(&rcIcon, pt))
+      return HTSYSMENU;
 
     if (pt.y < capH)
       return HTCAPTION;
