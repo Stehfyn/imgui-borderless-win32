@@ -62,6 +62,9 @@
     <ClCompile Include="dwmframe.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="imgui_impl_wglwindow.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="dxgipresent.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

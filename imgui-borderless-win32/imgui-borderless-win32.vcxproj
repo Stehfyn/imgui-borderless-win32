@@ -198,6 +198,7 @@
     <ClCompile Include="main.c" />
     <ClCompile Include="wglwindow.c" />
     <ClCompile Include="dwmframe.c" />
+    <ClCompile Include="imgui_impl_wglwindow.c" />
     <ClCompile Include="dxgipresent.cpp" />
     <ClCompile Include="generated\dear_bindings\dcimgui.cpp" />
     <ClCompile Include="generated\dear_bindings\dcimgui_internal.cpp" />
