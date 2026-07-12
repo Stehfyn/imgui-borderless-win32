@@ -36,6 +36,7 @@ extern "C" {
 #endif
 
 typedef struct DXGIPRESENT DXGIPRESENT;
+typedef struct DXGIPRESENTDEVICE DXGIPRESENTDEVICE;
 
 /* Modal pace tick posted by the vblank thread while a modal loop is live
  * (R5); the WndProc repaints on it, waitless and latch-deduped. */
@@ -44,7 +45,14 @@ typedef struct DXGIPRESENT DXGIPRESENT;
 /* GL-touching calls (Create, FillFromGL) require the GL context that owns
  * the frame's pixels to be current on the calling thread. */
 
-DXGIPRESENT* WINAPI DxgiPresent_Create(HWND hWnd);
+/* The D3D stack presenters render through (device/context/factory).  Owned
+ * by the CALLER — create one and pass it to every DxgiPresent_Create, the
+ * same way imgui renderer backends take the app's device at Init.  Device
+ * creation is expensive; presenters are created mid-drag. */
+DXGIPRESENTDEVICE* WINAPI DxgiPresentDevice_Create(VOID);
+VOID WINAPI DxgiPresentDevice_Destroy(DXGIPRESENTDEVICE* dev);
+
+DXGIPRESENT* WINAPI DxgiPresent_Create(HWND hWnd, DXGIPRESENTDEVICE* dev);
 VOID WINAPI DxgiPresent_Destroy(DXGIPRESENT* p);
 
 /* Copies the GL read buffer's bottom-left (cx, cy) rect into buffer 0

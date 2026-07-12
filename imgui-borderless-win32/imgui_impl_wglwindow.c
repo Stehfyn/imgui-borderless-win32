@@ -46,6 +46,7 @@ typedef struct ImGui_ImplWGLWindow_ViewportData
     BOOL  HwndOwned;
     DWORD DwStyle;
     DWORD DwExStyle;
+    BOOL  Presented;   /* first frame presented (reveal gates on it) */
 
     /* Coalesced deferred geometry commit (seam 2). */
     BOOL  PendingMove;
@@ -223,6 +224,19 @@ static void ImGui_ImplWGLWindow_ShowWindow(ImGuiViewport* viewport)
 
     if (!vd || !vd->Hwnd)
         return;
+
+    /* Present the first frame BEFORE revealing: a NOREDIRECTIONBITMAP
+     * window with nothing presented composits as a black flash.  The
+     * viewport's draw data for this frame exists (Render ran before
+     * UpdatePlatformWindows). */
+    if (!vd->Presented && viewport->DrawData)
+    {
+        ImGuiPlatformIO* platform_io = ImGui_GetPlatformIO();
+        if (platform_io->Platform_RenderWindow) platform_io->Platform_RenderWindow(viewport, NULL);
+        if (platform_io->Renderer_RenderWindow) platform_io->Renderer_RenderWindow(viewport, NULL);
+        if (platform_io->Platform_SwapBuffers)  platform_io->Platform_SwapBuffers(viewport, NULL);
+        vd->Presented = TRUE;
+    }
 
     /* ShowWindow even with SW_SHOWNA also brings the OWNER to front; detach
      * it for the call (canonical, imgui issues #7354/#8669). */
