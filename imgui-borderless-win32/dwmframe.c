@@ -157,8 +157,12 @@ static DWFCOLOR DwfTextColor(BOOL fDark, BOOL fActive)
 
 static DWFCOLOR DwfGlyphColor(BOOL fDark, BOOL fActive)
 {
+    /* Inactive grays measured off live uDWM captions (Explorer dark /
+     * Notepad light, 2026-07-12): peak glyph luma 128 on dark, 153 on
+     * light.  Brighter values (the old 0xAA) bloom the 1px stroke's
+     * antialiasing fringe and read as a fatter glyph than native. */
     return DwfColor(fActive ? (fDark ? RGB(255, 255, 255) : RGB(0, 0, 0))
-                            : (fDark ? RGB(0xAA, 0xAA, 0xAA) : RGB(0x64, 0x64, 0x64)));
+                            : (fDark ? RGB(0x80, 0x80, 0x80) : RGB(0x99, 0x99, 0x99)));
 }
 
 static DWFCOLOR DwfCaptionColor(BOOL fDark, BOOL fActive)
