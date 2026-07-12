@@ -12,8 +12,9 @@
 *  - GL pixels enter buffer 0 through WGL_NV_DX_interop2 (dxgi-noflicker §5)  *
 *    or, when interop is unavailable, glReadPixels + UpdateSubresource --     *
 *    creation therefore cannot fail on any D3D11-capable machine;             *
-*  - D2D chrome (dwmframe.c) draws into the SAME buffer between the GL fill   *
-*    and the present: content + chrome + layout are one present;              *
+*  - the caption chrome (dwmframe.c) is drawn in OPENGL into the GL frame     *
+*    BEFORE the fill, so buffer 0 receives client + chrome in one copy:       *
+*    content + chrome + layout are one present (no D2D anywhere);             *
 *  - the two-step present ladder with tearing flags, the R6 content pin on    *
 *    the DComp visual, the compositor-frame repaint latch (R4), the D3DKMT    *
 *    vblank wait, Commit+WaitForCommitCompletion (R2), and the modal pace     *
@@ -50,13 +51,6 @@ VOID WINAPI DxgiPresent_Destroy(DXGIPRESENT* p);
  * (top-down flip included): interop blit when available, otherwise
  * glReadPixels + UpdateSubresource. */
 BOOL WINAPI DxgiPresent_FillFromGL(DXGIPRESENT* p, int cx, int cy);
-
-/* Brackets the D2D chrome pass over buffer 0 (imguiapp DrawCallback slot):
- * BeginChrome returns the ID2D1DeviceContext (as void* -- dwmframe.c calls
- * it through its ABI-identical hand-declared vtable) with identity
- * transform and 96-dpi units; EndChrome ends the draw. */
-void* WINAPI DxgiPresent_BeginChrome(DXGIPRESENT* p);
-VOID WINAPI DxgiPresent_EndChrome(DXGIPRESENT* p);
 
 /* The reference two-step present ladder:
  *   Present(0, TEARING? | DO_NOT_WAIT | (fRestart ? RESTART : 0)); then
@@ -96,11 +90,6 @@ VOID WINAPI DxgiPresent_WaitForVBlank(DXGIPRESENT* p, HWND hWnd);
  * PaceTickHandled clears the coalescing flag from the message handler. */
 VOID WINAPI DxgiPresent_SetModalLive(DXGIPRESENT* p, BOOL fLive);
 VOID WINAPI DxgiPresent_PaceTickHandled(DXGIPRESENT* p);
-
-/* Pipeline objects for the chrome module, as opaque pointers (dwmframe.c is
- * a C TU with ABI-identical hand-declared vtables). */
-void* WINAPI DxgiPresent_GetD3DDevice(DXGIPRESENT* p);      /* ID3D11Device*        */
-void* WINAPI DxgiPresent_GetD2DContext(DXGIPRESENT* p);     /* ID2D1DeviceContext*  */
 
 #ifdef __cplusplus
 }

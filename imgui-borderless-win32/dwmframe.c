@@ -1,16 +1,17 @@
 /*
  * dwmframe.c -- WGLWindow caption chrome, ported from Win32X dwmframex.c (the in-process uDWM caption
- * compositor) and conformed to the imguiapp_impl_win32_d2ddxgi chrome tier.
+ * compositor), drawn with OpenGL.
  *
- * This module owns the CHROME: caption band, system icon, title (DWrite, system caption font), the four
- * caption buttons (light/dark, minimize, maximize/restore, close) with uDWM's 160ms hover/press/theme/
- * activation crossfades, the FindNCHit-order hit test, WM_NCCALCSIZE / WM_GETMINMAXINFO geometry, and the
+ * This module owns the CHROME: caption band, system icon, title (system caption font), the four caption
+ * buttons (light/dark, minimize, maximize/restore, close) with uDWM's 160ms hover/press/theme/activation
+ * crossfades, the FindNCHit-order hit test, WM_NCCALCSIZE / WM_GETMINMAXINFO geometry, and the
  * capture-tracked button press flow (xxxTrackCaptionButton shape).
  *
- * It does NOT own a pipeline: drawing happens into the presenter's D2D device context (dxgipresent.cpp,
- * target = the composition swapchain's buffer 0), between the GL fill and the present -- chrome and
- * client content are ONE present.  The context/device arrive as opaque pointers and are called through
- * hand-declared C vtables (ABI-identical to the real interfaces; the D2D/DWrite headers are C++-only).
+ * It does NOT own a pipeline: drawing is plain OpenGL into the window's GL frame (the pbuffer), after the
+ * client content and before the present -- chrome and client content are ONE atomic present.  Band and
+ * button highlights are untextured quads; the title, the button glyphs (Segoe Fluent Icons / Segoe MDL2
+ * Assets) and the system icon are GDI-rasterized into cached GL textures -- the same asset-prep role GDI
+ * plays for dwmframex's own icon path.  No D2D, no DWrite.
  *
  * Repaint policy: input/theme changes here only update state, arm the 160ms timer, and invalidate the
  * window; the window control renders full app frames (chrome included) through its one present path.
@@ -19,100 +20,26 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#define CINTERFACE          /* C lpVtbl layout for the COM headers that support it (d3d11/dxgi) */
-#define COBJMACROS
 
 #include <windows.h>
-#include <windowsx.h>
-#include <dxgi.h>
-#include <d3d11.h>
-#include <d2d1.h>
-#include <d2d1_1.h>
+#include <gl/gl.h>
 
 #include "dwmframe.h"
 
-#pragma comment(lib, "dwrite")
+#pragma comment(lib, "opengl32")
 
-/* winuser.h maps DrawText to DrawTextW; the vtable slot below is the real method name. */
-#ifdef DrawText
-#undef DrawText
+#ifndef GL_BGRA_EXT
+#define GL_BGRA_EXT       0x80E1
 #endif
-
-/* ---- our own COBJMACROS: a COM call is a vtable deref. ------------------------------------------ */
-#define CCALL(p, m, ...)  ((p)->lpVtbl->m((p), __VA_ARGS__))
-#define CCALL0(p, m)      ((p)->lpVtbl->m((p)))
-
-/* ---- hand-declared D2D / DWrite interfaces (C++-only headers; slot order per SDK) ---------------- */
-typedef struct IDWriteFactory    IDWriteFactory;
-typedef struct IDWriteTextFormat IDWriteTextFormat;
-typedef struct DWF_ID2D1Bitmap1  DWF_ID2D1Bitmap1;
-
-#define DWF_FACTORY_TYPE_SHARED         0u
-#define DWF_FONT_STYLE_NORMAL           0u
-#define DWF_FONT_STYLE_ITALIC           2u
-#define DWF_FONT_STRETCH_NORMAL         5u
-#define DWF_TEXT_ALIGNMENT_LEADING      0u
-#define DWF_TEXT_ALIGNMENT_CENTER       2u
-#define DWF_PARAGRAPH_ALIGNMENT_CENTER  2u
-#define DWF_WORD_WRAPPING_NO_WRAP       1u
-#define DWF_MEASURING_MODE_NATURAL      0u
-
-typedef struct ID2D1DeviceContextVtbl_
-{
-    HRESULT (STDMETHODCALLTYPE* QueryInterface)(ID2D1DeviceContext*, REFIID, void**);
-    ULONG   (STDMETHODCALLTYPE* AddRef)(ID2D1DeviceContext*);
-    ULONG   (STDMETHODCALLTYPE* Release)(ID2D1DeviceContext*);
-    void*   rsvd0[5];   /* slots 3..7 */
-    HRESULT (STDMETHODCALLTYPE* CreateSolidColorBrush)(ID2D1DeviceContext*, const D2D1_COLOR_F*, const D2D1_BRUSH_PROPERTIES*, ID2D1SolidColorBrush**); /* 8 */
-    void*   rsvd1[8];   /* slots 9..16 */
-    void    (STDMETHODCALLTYPE* FillRectangle)(ID2D1DeviceContext*, const D2D1_RECT_F*, ID2D1Brush*); /* slot 17 */
-    void*   rsvd2[8];   /* slots 18..25 */
-    void    (STDMETHODCALLTYPE* DrawBitmap)(ID2D1DeviceContext*, ID2D1Bitmap*, const D2D1_RECT_F*, FLOAT, D2D1_BITMAP_INTERPOLATION_MODE, const D2D1_RECT_F*); /* 26 */
-    void    (STDMETHODCALLTYPE* DrawText)(ID2D1DeviceContext*, const WCHAR*, UINT32, IDWriteTextFormat*, const D2D1_RECT_F*, ID2D1Brush*, D2D1_DRAW_TEXT_OPTIONS, UINT); /* 27 */
-    void*   rsvd3[2];   /* slots 28..29 */
-    void    (STDMETHODCALLTYPE* SetTransform)(ID2D1DeviceContext*, const D2D1_MATRIX_3X2_F*); /* slot 30 */
-    void*   rsvd4[31];  /* slots 31..61 */
-    HRESULT (STDMETHODCALLTYPE* CreateBitmapFromDxgiSurface)(ID2D1DeviceContext*, IDXGISurface*, const D2D1_BITMAP_PROPERTIES1*, DWF_ID2D1Bitmap1**); /* slot 62 */
-} ID2D1DeviceContextVtbl_;
-struct ID2D1DeviceContext { const ID2D1DeviceContextVtbl_* lpVtbl; };
-
-typedef struct DWF_ID2D1Bitmap1Vtbl
-{
-    HRESULT (STDMETHODCALLTYPE* QueryInterface)(DWF_ID2D1Bitmap1*, REFIID, void**);
-    ULONG   (STDMETHODCALLTYPE* AddRef)(DWF_ID2D1Bitmap1*);
-    ULONG   (STDMETHODCALLTYPE* Release)(DWF_ID2D1Bitmap1*);
-} DWF_ID2D1Bitmap1Vtbl;
-struct DWF_ID2D1Bitmap1 { const DWF_ID2D1Bitmap1Vtbl* lpVtbl; };
-
-typedef struct IDWriteFactoryVtbl
-{
-    HRESULT (STDMETHODCALLTYPE* QueryInterface)(IDWriteFactory*, REFIID, void**);
-    ULONG   (STDMETHODCALLTYPE* AddRef)(IDWriteFactory*);
-    ULONG   (STDMETHODCALLTYPE* Release)(IDWriteFactory*);
-    void*   rsvd[12];   /* slots 3..14 */
-    HRESULT (STDMETHODCALLTYPE* CreateTextFormat)(IDWriteFactory*, const WCHAR*, void*, UINT, UINT, UINT, FLOAT, const WCHAR*, IDWriteTextFormat**); /* 15 */
-} IDWriteFactoryVtbl;
-struct IDWriteFactory { const IDWriteFactoryVtbl* lpVtbl; };
-
-typedef struct IDWriteTextFormatVtbl
-{
-    HRESULT (STDMETHODCALLTYPE* QueryInterface)(IDWriteTextFormat*, REFIID, void**);
-    ULONG   (STDMETHODCALLTYPE* AddRef)(IDWriteTextFormat*);
-    ULONG   (STDMETHODCALLTYPE* Release)(IDWriteTextFormat*);
-    HRESULT (STDMETHODCALLTYPE* SetTextAlignment)(IDWriteTextFormat*, UINT);       /* slot 3 */
-    HRESULT (STDMETHODCALLTYPE* SetParagraphAlignment)(IDWriteTextFormat*, UINT);  /* slot 4 */
-    HRESULT (STDMETHODCALLTYPE* SetWordWrapping)(IDWriteTextFormat*, UINT);        /* slot 5 */
-} IDWriteTextFormatVtbl;
-struct IDWriteTextFormat { const IDWriteTextFormatVtbl* lpVtbl; };
-
-static const GUID DWF_IID_IDXGISurface =
-    { 0xcafcb56cu, 0x6ac3u, 0x4889u, { 0xbfu, 0x47u, 0x9eu, 0x23u, 0xbbu, 0xd2u, 0x60u, 0xecu } };
-static const GUID DWF_IID_IDWriteFactory =
-    { 0xb859ee5au, 0xd838u, 0x4b5bu, { 0xa2u, 0xe8u, 0x1au, 0xdcu, 0x7du, 0x93u, 0xdbu, 0x48u } };
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE  0x812F
+#endif
 
 enum DWF_BTN { DWB_NONE = 0, DWB_LIGHTDARK, DWB_MIN, DWB_MAX, DWB_CLOSE };
 
-EXTERN_C HRESULT WINAPI DWriteCreateFactory(UINT, REFIID, IUnknown**);
+/* Glyph texture slots (Segoe Fluent Icons codepoints, dwmframex's set). */
+enum DWF_GLYPH { DWFG_SUN, DWFG_MOON, DWFG_MIN, DWFG_MAX, DWFG_RESTORE, DWFG_CLOSE, DWFG_COUNT };
+static const WCHAR c_dwfGlyphCp[DWFG_COUNT] = { 0xE706, 0xE708, 0xE921, 0xE922, 0xE923, 0xE8BB };
 
 #define DWF_DWMWA_WINDOW_CORNER_PREFERENCE 33
 #define DWF_DWMWCP_ROUND                   2
@@ -141,54 +68,51 @@ static PFN_DWF_BLURBEHIND  g_dwfBlurBehind;
 #define DWF_ANIM_INTERVAL  8u
 #define DWF_ANIM_DURATION  160u
 
+typedef struct DWFCOLOR { float r; float g; float b; float a; } DWFCOLOR;
+typedef struct DWFTEX   { GLuint id; int w; int h; } DWFTEX;
+
 /* ---- per-window chrome state (the reference's g_dwf, pipeline-less) ------------------------------ */
 struct DWMFRAME
 {
-    HWND               hwnd;
-    IDWriteFactory*    pDWrite;
-    IDWriteTextFormat* pTextFormat;
-    IDWriteTextFormat* pIconFormat;
-    DWF_ID2D1Bitmap1*  pIconBmp;
-    BOOL               fIconTried;
-    BOOL               fFirstActivate;
-    int                idHot;
-    int                idPressed;
-    BOOL               fTracking;
-    BOOL               fCapturing;
-    BOOL               fDark;
-    BOOL               fWndActive;
-    BOOL               fAnim;
-    DWORD              dwAnimStart;
-    BOOL               fDarkFrom;
-    BOOL               fActiveFrom;
-    float              flAnimT;
-    float              flBtnOpacity[5];
+    HWND     hwnd;
+    BOOL     fIconTried;
+    BOOL     fFirstActivate;
+    int      idHot;
+    int      idPressed;
+    BOOL     fTracking;
+    BOOL     fCapturing;
+    BOOL     fDark;
+    BOOL     fWndActive;
+    BOOL     fAnim;
+    DWORD    dwAnimStart;
+    BOOL     fDarkFrom;
+    BOOL     fActiveFrom;
+    float    flAnimT;
+    float    flBtnOpacity[5];
+    /* GL chrome assets, owned by the window's GL context (current at every
+     * DrawChrome/Destroy per the header contract). */
+    UINT     assetDpi;                /* dpi the glyph/title assets were rasterized at */
+    DWFTEX   texIcon;                 /* system icon, BGRA straight alpha */
+    DWFTEX   texGlyph[DWFG_COUNT];    /* button glyphs, alpha masks */
+    DWFTEX   texTitle;                /* caption title, alpha mask */
+    WCHAR    szTitle[256];            /* text texTitle was rasterized from */
 };
 
 /* ---- helpers -------------------------------------------------------------------------------------- */
 
-static void DwfRelease(IUnknown** ppUnk)
+static DWFCOLOR DwfColor(COLORREF cr)
 {
-    if (*ppUnk)
-    {
-      CCALL0(*ppUnk, Release);
-      *ppUnk = NULL;
-    }
-}
-
-static D2D1_COLOR_F DwfColor(COLORREF cr)
-{
-    D2D1_COLOR_F c;
-    c.r = (FLOAT)GetRValue(cr) / 255.0f;
-    c.g = (FLOAT)GetGValue(cr) / 255.0f;
-    c.b = (FLOAT)GetBValue(cr) / 255.0f;
+    DWFCOLOR c;
+    c.r = (float)GetRValue(cr) / 255.0f;
+    c.g = (float)GetGValue(cr) / 255.0f;
+    c.b = (float)GetBValue(cr) / 255.0f;
     c.a = 1.0f;
     return c;
 }
 
-static D2D1_COLOR_F DwfLerp(D2D1_COLOR_F a, D2D1_COLOR_F b, float t)
+static DWFCOLOR DwfLerp(DWFCOLOR a, DWFCOLOR b, float t)
 {
-    D2D1_COLOR_F c;
+    DWFCOLOR c;
     c.r = a.r + (b.r - a.r) * t;
     c.g = a.g + (b.g - a.g) * t;
     c.b = a.b + (b.b - a.b) * t;
@@ -196,21 +120,21 @@ static D2D1_COLOR_F DwfLerp(D2D1_COLOR_F a, D2D1_COLOR_F b, float t)
     return c;
 }
 
-static D2D1_COLOR_F DwfTextColor(BOOL fDark, BOOL fActive)
+static DWFCOLOR DwfTextColor(BOOL fDark, BOOL fActive)
 {
-    D2D1_COLOR_F c = DwfColor(fDark ? RGB(255, 255, 255) : RGB(0, 0, 0));
+    DWFCOLOR c = DwfColor(fDark ? RGB(255, 255, 255) : RGB(0, 0, 0));
     if (!fActive)
       c.a = 0.60f;
     return c;
 }
 
-static D2D1_COLOR_F DwfGlyphColor(BOOL fDark, BOOL fActive)
+static DWFCOLOR DwfGlyphColor(BOOL fDark, BOOL fActive)
 {
     return DwfColor(fActive ? (fDark ? RGB(255, 255, 255) : RGB(0, 0, 0))
                             : (fDark ? RGB(0xAA, 0xAA, 0xAA) : RGB(0x64, 0x64, 0x64)));
 }
 
-static D2D1_COLOR_F DwfCaptionColor(BOOL fDark, BOOL fActive)
+static DWFCOLOR DwfCaptionColor(BOOL fDark, BOOL fActive)
 {
     COLORREF cr;
     if (fDark)
@@ -246,17 +170,18 @@ static void DwfWindowBorders(HWND hwnd, SIZE* psz)
 }
 
 /* Caption-button cells in CLIENT coords: native ~47-DIP cells scaled by DPI,
- * right-aligned, Close..light/dark right-to-left (uDWM UpdateNCAreaButton). */
-static int DwfButtonRects(HWND hwnd, RECT* prcClose, RECT* prcMax, RECT* prcMin, RECT* prcLD)
+ * right-aligned, Close..light/dark right-to-left (uDWM UpdateNCAreaButton).
+ * cxClient is the caller's DRIVEN client width — during the pre-geometry
+ * resize repaint GetClientRect still reports the old size, which would park
+ * the cluster at the stale right edge. */
+static int DwfButtonRects(HWND hwnd, int cxClient, RECT* prcClose, RECT* prcMax, RECT* prcMin, RECT* prcLD)
 {
-    RECT rc;
     UINT dpi  = DwfDpi(hwnd);
     int  capH = (int)DwmFrameCaptionHeight(hwnd);
     int  btnW = MulDiv(47, (int)dpi, 96);
     int  r;
 
-    GetClientRect(hwnd, &rc);
-    r = rc.right;
+    r = cxClient;
     prcClose->right = r; prcClose->left = r - btnW; r -= btnW;
     prcMax->right   = r; prcMax->left   = r - btnW; r -= btnW;
     prcMin->right   = r; prcMin->left   = r - btnW; r -= btnW;
@@ -268,13 +193,16 @@ static int DwfButtonRects(HWND hwnd, RECT* prcClose, RECT* prcMax, RECT* prcMin,
     return 1;
 }
 
-/* The reference's WM_ACTIVATE window dressing (imguiapp ApplyWindowDressing,
- * itself the ImmersiveWindow OnActivate): DwmExtendFrameIntoClientArea with
- * the canonical {1, 1, -1, 1} margins plus blur-behind with an EMPTY region.
- * Together they make the window's un-drawn area genuinely transparent — the
- * visible face ends exactly at the composed content instead of DWM giving
- * the whole window rect a default backdrop.  Idempotent; must be (re-)
- * applied in response to WM_ACTIVATE for the frame to settle. */
+/* Re-enable the DWM-drawn frame the NC removal stripped.  THIS window shape
+ * (WS_EX_NOREDIRECTIONBITMAP, BCS_WINDOW without WS_CAPTION) requires the
+ * FULL dressing (user-diagnosed): DwmExtendFrameIntoClientArea with the
+ * {1, 1, -1, 1} margins plus blur-behind with an EMPTY region — together
+ * they make the window's un-drawn area genuinely transparent, so the visible
+ * face ends exactly at the composed content (without blur-behind DWM
+ * backdrops the whole window rect; dwmframex's {0,0,1,0} margins fit its
+ * caption-demo window shape, not this one).  Plus rounded corners.
+ * Idempotent; must be (re-)applied in response to WM_ACTIVATE to settle;
+ * dwmapi loaded on first use. */
 static void DwfApplyDwmFrame(HWND hwnd)
 {
     union { FARPROC fp; PFN_DWF_EXTEND ex; PFN_DWF_SETATTR sa; PFN_DWF_BLURBEHIND bb; } u;
@@ -293,7 +221,6 @@ static void DwfApplyDwmFrame(HWND hwnd)
     }
     if (g_dwfExtend)
     {
-      /* Reference margins, verbatim. */
       m.cxLeft = 1; m.cxRight = 1; m.cyTop = -1; m.cyBottom = 1;
       (void)g_dwfExtend(hwnd, &m);
     }
@@ -315,85 +242,235 @@ static void DwfApplyDwmFrame(HWND hwnd)
     }
 }
 
-/* ---- formats + icon -------------------------------------------------------------------------------- */
+/* ---- GL texture assets ------------------------------------------------------------------------------
+ * Rasterization is GDI into a DIB (asset prep, once per text/dpi change);
+ * every per-frame draw is GL. */
 
-static NONCLIENTMETRICSW g_dwfNcm;   /* ~500 bytes: off-stack, GUI thread only (reference remedy) */
-
-static void DwfCreateTextFormat(DWMFRAME* f)
+static void DwfFreeTex(DWFTEX* pTex)
 {
-    FLOAT size;
+    if (pTex->id)
+      glDeleteTextures(1, &pTex->id);
+    pTex->id = 0;
+    pTex->w  = 0;
+    pTex->h  = 0;
+}
 
-    if (!f->pDWrite)
+static void DwfTexFromAlpha(DWFTEX* pTex, const BYTE* pAlpha, int w, int h)
+{
+    glGenTextures(1, &pTex->id);
+    if (!pTex->id)
       return;
-    DwfRelease((IUnknown**)&f->pTextFormat);
-    ZeroMemory(&g_dwfNcm, sizeof(g_dwfNcm));
-    g_dwfNcm.cbSize = (DWORD)sizeof(g_dwfNcm);
-    if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(g_dwfNcm), &g_dwfNcm, 0))
-      return;
-    size = (FLOAT)((g_dwfNcm.lfCaptionFont.lfHeight < 0) ? -g_dwfNcm.lfCaptionFont.lfHeight
-                                                         : g_dwfNcm.lfCaptionFont.lfHeight);
-    if (size < 1.0f)
-      size = 12.0f;
-    (void)CCALL(f->pDWrite, CreateTextFormat, g_dwfNcm.lfCaptionFont.lfFaceName, NULL,
-                (UINT)g_dwfNcm.lfCaptionFont.lfWeight,
-                g_dwfNcm.lfCaptionFont.lfItalic ? DWF_FONT_STYLE_ITALIC : DWF_FONT_STYLE_NORMAL,
-                DWF_FONT_STRETCH_NORMAL, size, L"", &f->pTextFormat);
-    if (f->pTextFormat)
+    glBindTexture(GL_TEXTURE_2D, pTex->id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, w, h, 0, GL_ALPHA, GL_UNSIGNED_BYTE, pAlpha);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    pTex->w = w;
+    pTex->h = h;
+}
+
+/* White-on-black grayscale-AA GDI text -> GL_ALPHA mask texture; the draw
+ * tints it with the vertex color (GL_MODULATE). */
+static BOOL DwfRasterizeTextAlpha(HFONT hFont, LPCWSTR psz, int cch, DWFTEX* pTex)
+{
+    HDC        hdcScreen;
+    HDC        hdcMem;
+    HFONT      hOldFont;
+    HBITMAP    hDib;
+    HBITMAP    hOldBmp;
+    BITMAPINFO bmi;
+    void*      pBits;
+    BYTE*      pAlpha;
+    SIZE       ext;
+    int        w;
+    int        h;
+    int        i;
+    BOOL       ok = FALSE;
+
+    DwfFreeTex(pTex);
+    if (!hFont || !psz || cch <= 0)
+      return FALSE;
+
+    hdcScreen = GetDC(NULL);
+    hdcMem    = CreateCompatibleDC(hdcScreen);
+    if (hdcScreen)
+      (void)ReleaseDC(NULL, hdcScreen);
+    if (!hdcMem)
+      return FALSE;
+
+    hOldFont = (HFONT)SelectObject(hdcMem, hFont);
+    ext.cx = 0;
+    ext.cy = 0;
+    (void)GetTextExtentPoint32W(hdcMem, psz, cch, &ext);
+    w = (int)ext.cx;
+    h = (int)ext.cy;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (w > 2048) w = 2048;
+    if (h > 512)  h = 512;
+
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize        = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth       = w;
+    bmi.bmiHeader.biHeight      = -h;           /* top-down */
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    pBits = NULL;
+    hDib  = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (hDib && pBits)
     {
-      (void)CCALL(f->pTextFormat, SetTextAlignment, DWF_TEXT_ALIGNMENT_LEADING);
-      (void)CCALL(f->pTextFormat, SetParagraphAlignment, DWF_PARAGRAPH_ALIGNMENT_CENTER);
-      (void)CCALL(f->pTextFormat, SetWordWrapping, DWF_WORD_WRAPPING_NO_WRAP);
+      hOldBmp = (HBITMAP)SelectObject(hdcMem, hDib);
+      ZeroMemory(pBits, (SIZE_T)w * (SIZE_T)h * 4u);
+      (void)SetBkMode(hdcMem, TRANSPARENT);
+      (void)SetTextColor(hdcMem, RGB(255, 255, 255));
+      (void)TextOutW(hdcMem, 0, 0, psz, cch);
+      (void)GdiFlush();
+      (void)SelectObject(hdcMem, hOldBmp);
+
+      pAlpha = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * (SIZE_T)h);
+      if (pAlpha)
+      {
+        const BYTE* src = (const BYTE*)pBits;
+        for (i = 0; i < w * h; ++i)
+          pAlpha[i] = src[i * 4 + 1];           /* green carries the grayscale coverage */
+        DwfTexFromAlpha(pTex, pAlpha, w, h);
+        HeapFree(GetProcessHeap(), 0, pAlpha);
+        ok = (pTex->id != 0);
+      }
+    }
+
+    if (hDib)
+      (void)DeleteObject(hDib);
+    (void)SelectObject(hdcMem, hOldFont);
+    (void)DeleteDC(hdcMem);
+    return ok;
+}
+
+/* System caption font at the window's dpi (the same font uDWM titles with),
+ * grayscale-AA so the mask carries clean coverage. */
+static HFONT DwfCreateCaptionFont(UINT dpi)
+{
+    static NONCLIENTMETRICSW ncm;   /* ~500 bytes: off-stack, GUI thread only (reference remedy) */
+
+    ZeroMemory(&ncm, sizeof(ncm));
+    ncm.cbSize = (DWORD)sizeof(ncm);
+    if (!SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(ncm), &ncm, 0, dpi) &&
+        !SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(ncm), &ncm, 0))
+      return NULL;
+    ncm.lfCaptionFont.lfQuality = ANTIALIASED_QUALITY;
+    return CreateFontIndirectW(&ncm.lfCaptionFont);
+}
+
+/* Icon glyph font: Segoe Fluent Icons (Win11) / Segoe MDL2 Assets (Win10) --
+ * the same glyphs uDWM bakes into its button atlas, sized to the caption. */
+static HFONT DwfCreateIconFont(int capH)
+{
+    static const WCHAR* faces[2] = { L"Segoe Fluent Icons", L"Segoe MDL2 Assets" };
+    HDC   hdc;
+    int   size;
+    int   i;
+    HFONT hFont;
+
+    size = MulDiv(capH, 36, 100);
+    if (size < 8)
+      size = 8;
+
+    hdc = GetDC(NULL);
+    for (i = 0; i < 2; ++i)
+    {
+      hFont = CreateFontW(-size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                          DEFAULT_PITCH | FF_DONTCARE, faces[i]);
+      if (hFont && hdc)
+      {
+        WCHAR face[LF_FACESIZE];
+        HFONT hOld = (HFONT)SelectObject(hdc, hFont);
+        face[0] = 0;
+        (void)GetTextFaceW(hdc, LF_FACESIZE, face);
+        (void)SelectObject(hdc, hOld);
+        if (0 == lstrcmpiW(face, faces[i]))
+          break;
+        (void)DeleteObject(hFont);
+        hFont = NULL;
+      }
+      if (hFont)
+        break;
+    }
+    if (hdc)
+      (void)ReleaseDC(NULL, hdc);
+    return hFont;
+}
+
+/* (Re)build the glyph + title mask textures whenever the dpi or the window
+ * text changed; cheap no-op otherwise. */
+static void DwfEnsureChromeAssets(DWMFRAME* f, HWND hwnd)
+{
+    UINT  dpi  = DwfDpi(hwnd);
+    int   capH = (int)DwmFrameCaptionHeight(hwnd);
+    WCHAR sz[256];
+    int   i;
+
+    if (dpi != f->assetDpi)
+    {
+      for (i = 0; i < DWFG_COUNT; ++i)
+        DwfFreeTex(&f->texGlyph[i]);
+      DwfFreeTex(&f->texTitle);
+      f->szTitle[0] = 1;   /* != any real title: forces the re-rasterize below */
+      f->szTitle[1] = 0;
+      f->assetDpi   = dpi;
+    }
+
+    if (!f->texGlyph[DWFG_CLOSE].id)
+    {
+      HFONT hFont = DwfCreateIconFont(capH);
+      if (hFont)
+      {
+        for (i = 0; i < DWFG_COUNT; ++i)
+          (void)DwfRasterizeTextAlpha(hFont, &c_dwfGlyphCp[i], 1, &f->texGlyph[i]);
+        (void)DeleteObject(hFont);
+      }
+    }
+
+    sz[0] = 0;
+    (void)GetWindowTextW(hwnd, sz, ARRAYSIZE(sz));
+    if (0 != lstrcmpW(sz, f->szTitle))
+    {
+      lstrcpynW(f->szTitle, sz, ARRAYSIZE(f->szTitle));
+      DwfFreeTex(&f->texTitle);
+      if (sz[0])
+      {
+        HFONT hFont = DwfCreateCaptionFont(dpi);
+        if (hFont)
+        {
+          (void)DwfRasterizeTextAlpha(hFont, sz, lstrlenW(sz), &f->texTitle);
+          (void)DeleteObject(hFont);
+        }
+      }
     }
 }
 
-static void DwfCreateIconFormat(DWMFRAME* f)
+/* High-res caption icon: the window's big icon rasterized once into a BGRA
+ * DIB (straight alpha; GL blending premultiplies at draw time), uploaded as
+ * a GL texture (reference DwfEnsureIcon, GL flavor). */
+static void DwfEnsureIcon(DWMFRAME* f, HWND hwnd)
 {
-    FLOAT size;
+    HICON      hIcon;
+    ICONINFO   ii;
+    BITMAP     bm;
+    BITMAPINFO bmi;
+    HDC        hdcScreen;
+    HDC        hdcMem;
+    HBITMAP    hDib;
+    HBITMAP    hOld;
+    void*      pBits;
+    int        n;
 
-    if (!f->pDWrite)
-      return;
-    DwfRelease((IUnknown**)&f->pIconFormat);
-    size = (FLOAT)DwmFrameCaptionHeight(f->hwnd) * 0.36f;
-    if (size < 8.0f)
-      size = 8.0f;
-    (void)CCALL(f->pDWrite, CreateTextFormat, L"Segoe Fluent Icons", NULL, 400u,
-                DWF_FONT_STYLE_NORMAL, DWF_FONT_STRETCH_NORMAL, size, L"", &f->pIconFormat);
-    if (!f->pIconFormat)
-      (void)CCALL(f->pDWrite, CreateTextFormat, L"Segoe MDL2 Assets", NULL, 400u,
-                  DWF_FONT_STYLE_NORMAL, DWF_FONT_STRETCH_NORMAL, size, L"", &f->pIconFormat);
-    if (f->pIconFormat)
-    {
-      (void)CCALL(f->pIconFormat, SetTextAlignment, DWF_TEXT_ALIGNMENT_CENTER);
-      (void)CCALL(f->pIconFormat, SetParagraphAlignment, DWF_PARAGRAPH_ALIGNMENT_CENTER);
-      (void)CCALL(f->pIconFormat, SetWordWrapping, DWF_WORD_WRAPPING_NO_WRAP);
-    }
-}
-
-/* High-res caption icon: the window's big icon rasterized once into a
- * premultiplied BGRA DIB, uploaded as an ID3D11Texture2D on the PRESENTER's
- * device, wrapped as a D2D bitmap on the presenter's context (reference
- * DwfEnsureIcon). */
-static void DwfEnsureIcon(DWMFRAME* f, HWND hwnd, ID3D11Device* pDev, ID2D1DeviceContext* pDC)
-{
-    HICON                   hIcon;
-    ICONINFO                ii;
-    BITMAP                  bm;
-    BITMAPINFO              biH;
-    HDC                     hdcScreen;
-    HDC                     hdcMem;
-    HBITMAP                 hDib;
-    HBITMAP                 hOld;
-    void*                   pBits;
-    BYTE*                   p;
-    int                     n;
-    int                     i;
-    ID3D11Texture2D*        pTex;
-    IDXGISurface*           pSurf;
-    D3D11_TEXTURE2D_DESC    td;
-    D3D11_SUBRESOURCE_DATA  sd;
-    D2D1_BITMAP_PROPERTIES1 bp;
-
-    if (f->pIconBmp || f->fIconTried || !pDev || !pDC)
+    if (f->texIcon.id || f->fIconTried)
       return;
     f->fIconTried = TRUE;
 
@@ -415,98 +492,85 @@ static void DwfEnsureIcon(DWMFRAME* f, HWND hwnd, ID3D11Device* pDev, ID2D1Devic
     if (n < 16)  n = 16;
     if (n > 256) n = 256;
 
-    ZeroMemory(&biH, sizeof(biH));
-    biH.bmiHeader.biSize        = (DWORD)sizeof(BITMAPINFOHEADER);
-    biH.bmiHeader.biWidth       = n;
-    biH.bmiHeader.biHeight      = -n;
-    biH.bmiHeader.biPlanes      = 1;
-    biH.bmiHeader.biBitCount    = 32;
-    biH.bmiHeader.biCompression = BI_RGB;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize        = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth       = n;
+    bmi.bmiHeader.biHeight      = -n;           /* top-down */
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
 
     pBits     = NULL;
-    pTex      = NULL;
-    pSurf     = NULL;
     hdcScreen = GetDC(NULL);
     hdcMem    = CreateCompatibleDC(hdcScreen);
-    hDib      = CreateDIBSection(hdcScreen, &biH, DIB_RGB_COLORS, &pBits, NULL, 0u);
+    hDib      = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0u);
     if (hdcScreen) (void)ReleaseDC(NULL, hdcScreen);
 
     if (hdcMem && hDib && pBits)
     {
       hOld = (HBITMAP)SelectObject(hdcMem, hDib);
+      ZeroMemory(pBits, (SIZE_T)n * (SIZE_T)n * 4u);
       (void)DrawIconEx(hdcMem, 0, 0, hIcon, n, n, 0u, NULL, DI_NORMAL);
       (void)GdiFlush();
       (void)SelectObject(hdcMem, hOld);
 
-      p = (BYTE*)pBits;
-      for (i = 0; i < n * n; ++i)
+      glGenTextures(1, &f->texIcon.id);
+      if (f->texIcon.id)
       {
-        UINT a = p[3];
-        p[0] = (BYTE)(((UINT)p[0] * a) / 255u);
-        p[1] = (BYTE)(((UINT)p[1] * a) / 255u);
-        p[2] = (BYTE)(((UINT)p[2] * a) / 255u);
-        p += 4;
-      }
-
-      ZeroMemory(&td, sizeof(td));
-      td.Width            = (UINT)n;
-      td.Height           = (UINT)n;
-      td.MipLevels        = 1u;
-      td.ArraySize        = 1u;
-      td.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
-      td.SampleDesc.Count = 1u;
-      td.Usage            = D3D11_USAGE_DEFAULT;
-      td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-      sd.pSysMem          = pBits;
-      sd.SysMemPitch      = (UINT)(n * 4);
-      sd.SysMemSlicePitch = 0u;
-      (void)CCALL(pDev, CreateTexture2D, &td, &sd, &pTex);
-      if (pTex)
-        (void)CCALL((IUnknown*)pTex, QueryInterface, &DWF_IID_IDXGISurface, (void**)&pSurf);
-      if (pSurf)
-      {
-        bp.pixelFormat.format    = DXGI_FORMAT_B8G8R8A8_UNORM;
-        bp.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
-        bp.dpiX                  = 96.0f;
-        bp.dpiY                  = 96.0f;
-        bp.bitmapOptions         = D2D1_BITMAP_OPTIONS_NONE;
-        bp.colorContext          = NULL;
-        (void)CCALL(pDC, CreateBitmapFromDxgiSurface, pSurf, &bp, &f->pIconBmp);
+        glBindTexture(GL_TEXTURE_2D, f->texIcon.id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, n, n, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, pBits);
+        f->texIcon.w = n;
+        f->texIcon.h = n;
       }
     }
 
-    DwfRelease((IUnknown**)&pSurf);
-    DwfRelease((IUnknown**)&pTex);
     if (hDib)   (void)DeleteObject(hDib);
     if (hdcMem) (void)DeleteDC(hdcMem);
 }
 
-/* ---- chrome drawing (into the presenter's context; imguiapp DrawCallback slot) -------------------- */
+/* ---- GL drawing ------------------------------------------------------------------------------------ */
 
-static void DwfDrawGlyph(DWMFRAME* f, ID2D1DeviceContext* pDC, ID2D1Brush* pBrush, const RECT* prc, WCHAR glyph)
+static void DwfFillRectGL(float x0, float y0, float x1, float y1, DWFCOLOR c)
 {
-    IDWriteTextFormat* pf = f->pIconFormat ? f->pIconFormat : f->pTextFormat;
-    D2D1_RECT_F        rc;
-    WCHAR              s[1];
-
-    if (!pf)
-      return;
-    s[0]      = glyph;
-    rc.left   = (FLOAT)prc->left;
-    rc.top    = (FLOAT)prc->top;
-    rc.right  = (FLOAT)prc->right;
-    rc.bottom = (FLOAT)prc->bottom;
-    CCALL(pDC, DrawText, s, 1u, pf, &rc, pBrush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWF_MEASURING_MODE_NATURAL);
+    glDisable(GL_TEXTURE_2D);
+    glColor4f(c.r, c.g, c.b, c.a);
+    glBegin(GL_QUADS);
+    glVertex2f(x0, y0);
+    glVertex2f(x1, y0);
+    glVertex2f(x1, y1);
+    glVertex2f(x0, y1);
+    glEnd();
 }
 
-static void DwfDrawButton(DWMFRAME* f, ID2D1DeviceContext* pDC, const RECT* prc, int id, WCHAR glyph,
-                          BOOL fDark, D2D1_COLOR_F cfGlyph, float flHover)
+static void DwfDrawTexGL(const DWFTEX* pTex, float x, float y, float w, float h, DWFCOLOR c)
 {
-    BOOL                  fPressed = (f->idPressed == id);
-    COLORREF              crFill;
-    D2D1_COLOR_F          cf;
-    D2D1_RECT_F           rf;
-    ID2D1SolidColorBrush* pb;
+    if (!pTex->id)
+      return;
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, pTex->id);
+    glColor4f(c.r, c.g, c.b, c.a);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0.0f, 0.0f); glVertex2f(x,     y);
+    glTexCoord2f(1.0f, 0.0f); glVertex2f(x + w, y);
+    glTexCoord2f(1.0f, 1.0f); glVertex2f(x + w, y + h);
+    glTexCoord2f(0.0f, 1.0f); glVertex2f(x,     y + h);
+    glEnd();
+}
+
+/* One caption button: hover/press highlight (alpha-faded by flHover, the
+ * per-button 160ms opacity) + the glyph mask centered in the cell.  Close's
+ * glyph cross-fades to white as its red highlight fades in. */
+static void DwfDrawButton(DWMFRAME* f, const RECT* prc, int id, const DWFTEX* pGlyph,
+                          BOOL fDark, DWFCOLOR cfGlyph, float flHover)
+{
+    BOOL     fPressed = (f->idPressed == id);
+    COLORREF crFill;
+    DWFCOLOR cf;
 
     if (DWB_CLOSE == id)
     {
@@ -519,45 +583,32 @@ static void DwfDrawButton(DWMFRAME* f, ID2D1DeviceContext* pDC, const RECT* prc,
                         : (fDark ? RGB(0x3D, 0x3D, 0x3D) : RGB(0xE9, 0xE9, 0xE9));
     }
 
-    rf.left   = (FLOAT)prc->left;
-    rf.top    = (FLOAT)prc->top;
-    rf.right  = (FLOAT)prc->right;
-    rf.bottom = (FLOAT)prc->bottom;
     if (flHover > 0.001f)
     {
       cf   = DwfColor(crFill);
       cf.a = flHover;
-      pb   = NULL;
-      (void)CCALL(pDC, CreateSolidColorBrush, &cf, NULL, &pb);
-      if (pb)
-      {
-        CCALL(pDC, FillRectangle, &rf, (ID2D1Brush*)pb);
-        DwfRelease((IUnknown**)&pb);
-      }
+      DwfFillRectGL((float)prc->left, (float)prc->top, (float)prc->right, (float)prc->bottom, cf);
     }
-    cf = cfGlyph;
-    pb = NULL;
-    (void)CCALL(pDC, CreateSolidColorBrush, &cf, NULL, &pb);
-    if (pb)
+
+    if (pGlyph && pGlyph->id)
     {
-      DwfDrawGlyph(f, pDC, (ID2D1Brush*)pb, prc, glyph);
-      DwfRelease((IUnknown**)&pb);
+      float gx = (float)prc->left + (float)((prc->right - prc->left) - pGlyph->w) * 0.5f;
+      float gy = (float)prc->top  + (float)((prc->bottom - prc->top) - pGlyph->h) * 0.5f;
+      DwfDrawTexGL(pGlyph, gx, gy, (float)pGlyph->w, (float)pGlyph->h, cfGlyph);
     }
 }
 
-VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, void* pD2DContext, void* pD3DDevice, int cx, int cy)
+VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
 {
-    ID2D1DeviceContext*   pDC  = (ID2D1DeviceContext*)pD2DContext;
-    ID3D11Device*         pDev = (ID3D11Device*)pD3DDevice;
-    ID2D1SolidColorBrush* pBrush;
-    int                   capH;
-    BOOL                  fActive;
-    BOOL                  fDark;
-    D2D1_COLOR_F          colCap;
-    D2D1_COLOR_F          colText;
-    D2D1_COLOR_F          colGlyph;
+    int      capH;
+    BOOL     fActive;
+    BOOL     fDark;
+    DWFCOLOR colCap;
+    DWFCOLOR colText;
+    DWFCOLOR colGlyph;
+    DWFCOLOR colWhite;
 
-    if (!f || !pDC || cx <= 0 || cy <= 0)
+    if (!f || cx <= 0 || cy <= 0)
       return;
 
     capH    = (int)DwmFrameCaptionHeight(hwnd);
@@ -574,24 +625,37 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, void* pD2DContext, void* 
       colText  = DwfLerp(DwfTextColor(fDk1, fAc1),    DwfTextColor(fDark, fActive),    t);
       colGlyph = DwfLerp(DwfGlyphColor(fDk1, fAc1),   DwfGlyphColor(fDark, fActive),   t);
     }
+    colWhite.r = colWhite.g = colWhite.b = colWhite.a = 1.0f;
+
+    DwfEnsureChromeAssets(f, hwnd);
+    DwfEnsureIcon(f, hwnd);
+
+    /* Window-coordinate ortho over the (cx, cy) frame.  The presenter's blit
+     * (and the readback flip) turns the GL bottom-up image top-down, so
+     * top-of-projection here IS the top of the window. */
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT | GL_TEXTURE_BIT |
+                 GL_VIEWPORT_BIT | GL_SCISSOR_BIT | GL_TRANSFORM_BIT | GL_DEPTH_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0.0, (double)cx, (double)cy, 0.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glViewport(0, 0, cx, cy);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_ALPHA_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
     /* Caption band over the client content's top strip (the app lays out
      * below it via the viewport work-area inset). */
-    {
-      ID2D1SolidColorBrush* pCap = NULL;
-      D2D1_RECT_F           rcCap;
-
-      (void)CCALL(pDC, CreateSolidColorBrush, &colCap, NULL, &pCap);
-      if (pCap)
-      {
-        rcCap.left   = 0.0f;
-        rcCap.top    = 0.0f;
-        rcCap.right  = (FLOAT)cx;
-        rcCap.bottom = (FLOAT)capH;
-        CCALL(pDC, FillRectangle, &rcCap, (ID2D1Brush*)pCap);
-        DwfRelease((IUnknown**)&pCap);
-      }
-    }
+    DwfFillRectGL(0.0f, 0.0f, (float)cx, (float)capH, colCap);
 
     /* Caption system icon at the win32kfull DrawCaptionIcon slot. */
     {
@@ -601,57 +665,35 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, void* pD2DContext, void* 
       int  ix  = (capH - iw) / 2 + 1;
       int  iy  = (capH - ih) / 2;
 
-      DwfEnsureIcon(f, hwnd, pDev, pDC);
-      if (f->pIconBmp)
-      {
-        D2D1_RECT_F ri;
-        ri.left   = (FLOAT)ix;
-        ri.top    = (FLOAT)iy;
-        ri.right  = (FLOAT)(ix + iw);
-        ri.bottom = (FLOAT)(iy + ih);
-        CCALL(pDC, DrawBitmap, (ID2D1Bitmap*)f->pIconBmp, &ri, 1.0f,
-              D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, NULL);
-      }
+      DwfDrawTexGL(&f->texIcon, (float)ix, (float)iy, (float)iw, (float)ih, colWhite);
     }
 
     /* Caption title (system caption font); starts one caption-height in
      * (xxxDrawCaptionTemp: rc.left += capH for the icon slot). */
+    if (f->texTitle.id)
     {
-      WCHAR szTitle[256];
-      int   cch;
-
-      szTitle[0] = 0;
-      cch = GetWindowTextW(hwnd, szTitle, ARRAYSIZE(szTitle));
-      if (f->pTextFormat && szTitle[0])
-      {
-        pBrush = NULL;
-        (void)CCALL(pDC, CreateSolidColorBrush, &colText, NULL, &pBrush);
-        if (pBrush)
-        {
-          D2D1_RECT_F rcText;
-          rcText.left   = (FLOAT)capH;
-          rcText.top    = 0.0f;
-          rcText.right  = (FLOAT)cx;
-          rcText.bottom = (FLOAT)capH;
-          CCALL(pDC, DrawText, szTitle, (UINT32)cch, f->pTextFormat, &rcText,
-                (ID2D1Brush*)pBrush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWF_MEASURING_MODE_NATURAL);
-          DwfRelease((IUnknown**)&pBrush);
-        }
-      }
+      float ty = (float)(capH - f->texTitle.h) * 0.5f;
+      DwfDrawTexGL(&f->texTitle, (float)capH, ty, (float)f->texTitle.w, (float)f->texTitle.h, colText);
     }
 
     /* Caption buttons: light/dark, Minimize, Maximize/Restore, Close. */
     {
       RECT rcClose, rcMax, rcMin, rcLD;
 
-      if (DwfButtonRects(hwnd, &rcClose, &rcMax, &rcMin, &rcLD))
+      if (DwfButtonRects(hwnd, cx, &rcClose, &rcMax, &rcMin, &rcLD))
       {
-        DwfDrawButton(f, pDC, &rcLD,    DWB_LIGHTDARK, (WCHAR)(fDark ? 0xE706 : 0xE708),          fDark, colGlyph, f->flBtnOpacity[DWB_LIGHTDARK]);
-        DwfDrawButton(f, pDC, &rcMin,   DWB_MIN,       (WCHAR)0xE921,                             fDark, colGlyph, f->flBtnOpacity[DWB_MIN]);
-        DwfDrawButton(f, pDC, &rcMax,   DWB_MAX,       (WCHAR)(IsZoomed(hwnd) ? 0xE923 : 0xE922), fDark, colGlyph, f->flBtnOpacity[DWB_MAX]);
-        DwfDrawButton(f, pDC, &rcClose, DWB_CLOSE,     (WCHAR)0xE8BB,                             fDark, colGlyph, f->flBtnOpacity[DWB_CLOSE]);
+        DwfDrawButton(f, &rcLD,    DWB_LIGHTDARK, &f->texGlyph[fDark ? DWFG_SUN : DWFG_MOON],          fDark, colGlyph, f->flBtnOpacity[DWB_LIGHTDARK]);
+        DwfDrawButton(f, &rcMin,   DWB_MIN,       &f->texGlyph[DWFG_MIN],                              fDark, colGlyph, f->flBtnOpacity[DWB_MIN]);
+        DwfDrawButton(f, &rcMax,   DWB_MAX,       &f->texGlyph[IsZoomed(hwnd) ? DWFG_RESTORE : DWFG_MAX], fDark, colGlyph, f->flBtnOpacity[DWB_MAX]);
+        DwfDrawButton(f, &rcClose, DWB_CLOSE,     &f->texGlyph[DWFG_CLOSE],                            fDark, colGlyph, f->flBtnOpacity[DWB_CLOSE]);
       }
     }
+
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glPopAttrib();
 }
 
 /* ---- lifecycle ------------------------------------------------------------------------------------- */
@@ -665,23 +707,25 @@ DWMFRAME* WINAPI DwmFrameCreate(HWND hwnd)
     f->fDark      = TRUE;    /* app style is dark; seed before the first paint */
     f->fWndActive = TRUE;
 
-    (void)DWriteCreateFactory(DWF_FACTORY_TYPE_SHARED, &DWF_IID_IDWriteFactory, (IUnknown**)&f->pDWrite);
-    DwfCreateTextFormat(f);
-    DwfCreateIconFormat(f);
     DwfApplyDwmFrame(hwnd);
     return f;
 }
 
 VOID WINAPI DwmFrameDestroy(DWMFRAME* f)
 {
+    int i;
+
     if (!f)
       return;
     if (f->hwnd && f->fAnim)
       (void)KillTimer(f->hwnd, DWF_ANIM_TIMER_ID);
-    DwfRelease((IUnknown**)&f->pTextFormat);
-    DwfRelease((IUnknown**)&f->pIconFormat);
-    DwfRelease((IUnknown**)&f->pIconBmp);
-    DwfRelease((IUnknown**)&f->pDWrite);
+    if (wglGetCurrentContext())
+    {
+      DwfFreeTex(&f->texIcon);
+      DwfFreeTex(&f->texTitle);
+      for (i = 0; i < DWFG_COUNT; ++i)
+        DwfFreeTex(&f->texGlyph[i]);
+    }
     HeapFree(GetProcessHeap(), 0, f);
 }
 
@@ -689,25 +733,29 @@ VOID WINAPI DwmFrameDestroy(DWMFRAME* f)
 
 UINT WINAPI DwmFrameNCCalcSize(HWND hwnd, BOOL fCalcValidRects, NCCALCSIZE_PARAMS* lpcsp)
 {
+    SIZE border;
+
     if (!fCalcValidRects)
       return 0;
 
-    /* CLIENT == WINDOW, exactly (dwmframex topology).  No nonclient pixels
-     * exist at all: the window origin and the client origin coincide, the
-     * composed content covers the full window by construction, and the
-     * resize ring is synthesized INSIDE the client edges by the hit test.
-     * This removes every dependency on where the composition visual anchors
-     * for a client-inset window — the two candidate origins are the same
-     * point.  rgrc[1] = rgrc[2] is the reference's "lie to dwm"; maximized,
-     * the client is the monitor work area EXACTLY (pairs with
-     * DwmFrameGetMinMaxInfo). */
+    /* Canon topology (imguiapp_impl_win32_d2ddxgi WM_NCCALCSIZE, verbatim):
+     * rgrc[1] = rgrc[2] is the reference's "lie to dwm" (no stretch/garbage
+     * fill of the grown region); maximized, the client is the monitor work
+     * area EXACTLY (pairs with DwmFrameGetMinMaxInfo); otherwise the
+     * left/right/bottom invisible resize borders sit OUTSIDE the client rect
+     * — the top border rides INSIDE it (the hit test claims it). */
     lpcsp->rgrc[1] = lpcsp->rgrc[2];
     if (IsZoomed(hwnd))
     {
       MONITORINFO mi = { sizeof(mi) };
       if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
         lpcsp->rgrc[0] = mi.rcWork;
+      return 0;
     }
+    DwfWindowBorders(hwnd, &border);
+    lpcsp->rgrc[0].left   += border.cx;
+    lpcsp->rgrc[0].right  -= border.cx;
+    lpcsp->rgrc[0].bottom -= border.cy;
     return 0;
 }
 
@@ -764,12 +812,12 @@ UINT WINAPI DwmFrameHitTest(DWMFRAME* f, HWND hwnd, int x, int y)
     pt.y = y;
     ScreenToClient(hwnd, &pt);
     GetClientRect(hwnd, &client);
-    DwfWindowBorders(hwnd, &border);
     capH     = (int)DwmFrameCaptionHeight(hwnd);
     style    = GetWindowLongPtr(hwnd, GWL_STYLE);
     fSizable = (0 != (style & WS_THICKFRAME)) && !IsZoomed(hwnd);
 
-    if (DwfButtonRects(hwnd, &rcClose, &rcMax, &rcMin, &rcLD))
+    /* Caption buttons first (the canon's chrome-hittest callback layer). */
+    if (DwfButtonRects(hwnd, (int)client.right, &rcClose, &rcMax, &rcMin, &rcLD))
     {
       if (PtInRect(&rcLD, pt))    return HTLIGHTDARKBTN;
       if (PtInRect(&rcMin, pt))   return HTMINBUTTON;
@@ -786,14 +834,17 @@ UINT WINAPI DwmFrameHitTest(DWMFRAME* f, HWND hwnd, int x, int y)
 
     if (fSizable)
     {
-      /* Client == window: the whole resize ring lives INSIDE the client
-       * edges (dwmframex DwfHitTest shape). */
+      /* Canon ring (imguiapp DefaultNCHitTest, verbatim): the left/right/
+       * bottom borders sit OUTSIDE the client rect (WM_NCCALCSIZE insets
+       * them, so they land here as pt.x < 0 / pt.x >= client.right /
+       * pt.y >= client.bottom); only the top border rides INSIDE. */
+      DwfWindowBorders(hwnd, &border);
       row = 1;
       col = 1;
-      if (pt.y < border.cy)                        row = 0;
-      else if (pt.y >= client.bottom - border.cy)  row = 2;
-      if (pt.x < border.cx)                        col = 0;
-      else if (pt.x >= client.right - border.cx)   col = 2;
+      if (pt.y < border.cy)              row = 0;
+      else if (pt.y >= client.bottom)    row = 2;
+      if (pt.x < 0)                      col = 0;
+      else if (pt.x >= client.right)     col = 2;
 
       if (0 == row)
       {

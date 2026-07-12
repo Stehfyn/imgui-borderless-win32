@@ -1,12 +1,14 @@
 /*
- * dwmframe.h -- WGLWindow caption chrome (Win32X dwmframex.c port, conformed
- * to the imguiapp_impl_win32_d2ddxgi chrome tier).
+ * dwmframe.h -- WGLWindow caption chrome (Win32X dwmframex.c port, drawn
+ * with OpenGL).
  *
  * Owns the chrome STATE and DRAWING: caption band, system icon, title,
  * min/max/close + light/dark buttons with uDWM's 160ms crossfades, the
  * FindNCHit-order hit test, WM_NCCALCSIZE / WM_GETMINMAXINFO geometry, and
- * the capture-tracked button press flow.  Drawing happens into the
- * PRESENTER's D2D context (dxgipresent.h) between the GL fill and the
+ * the capture-tracked button press flow.  Drawing is plain OpenGL into the
+ * window's GL frame (band and highlights as quads; title, button glyphs and
+ * the system icon as GDI-rasterized textures -- the same asset-prep role GDI
+ * plays for dwmframex's icon), after the client content and before the
  * present, so chrome + client content are one atomic present.  Input and
  * theme changes only update state, arm the animation timer, and invalidate;
  * the window control renders full frames through its one present path.
@@ -29,17 +31,17 @@ typedef struct DWMFRAME DWMFRAME;
 /* win32kfull FindNCHit private result for the light/dark caption button. */
 #define HTLIGHTDARKBTN  0x0000B002
 
-/* Chrome state + DWrite formats + DWM frame dressing for hwnd.  No graphics
- * pipeline is created here (the presenter owns it), so creation only fails
- * on allocation failure. */
+/* Chrome state + DWM frame dressing for hwnd.  No graphics pipeline is
+ * created here (the window's GL context owns the drawing), so creation only
+ * fails on allocation failure.  Destroy with the window's GL context current
+ * so the cached textures can be released. */
 DWMFRAME* WINAPI DwmFrameCreate(HWND hwnd);
 VOID WINAPI DwmFrameDestroy(DWMFRAME* f);
 
-/* Draws the caption chrome into the presenter's D2D context (opaque
- * pointers: this is a C TU with ABI-identical hand-declared vtables).  Call
- * between DxgiPresent_BeginChrome and DxgiPresent_EndChrome with the client
- * size the frame was rendered at. */
-VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, void* pD2DContext, void* pD3DDevice, int cx, int cy);
+/* Draws the caption chrome with OpenGL into the current GL context's draw
+ * buffer, in window coordinates, over the (cx, cy) client-sized frame.  Call
+ * after the client content is rendered, before the present. */
+VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy);
 
 /* Caption band height in pixels. */
 UINT WINAPI DwmFrameCaptionHeight(HWND hwnd);

@@ -6,12 +6,14 @@
 * Transcribed from the working imguiapp_impl_win32_d2ddxgi backend:           *
 * creation ladder (feature levels 10_0-first, AUTHORITATIVE|SINGLETHREADED|   *
 * BGRA device, desktop-sized premultiplied FLIP_DISCARD composition           *
-* swapchain with TEARING|MODE_SWITCH|WAITABLE, buffer 0 bound once, D2D      *
-* target bitmap on buffer 0, DComp target/visual/SetContent/root/Commit),     *
-* the two-step present ladder, the R6 pin, the R4 latch, the R2 wait, the     *
-* D3DKMT vblank wait, and the R5 pace thread.  GL pixels enter buffer 0 via   *
-* WGL_NV_DX_interop2 (dxgi-noflicker §5) with a glReadPixels +               *
-* UpdateSubresource fallback so creation cannot fail on interop-less boxes.   *
+* swapchain with TEARING|MODE_SWITCH|WAITABLE, buffer 0 bound once, DComp     *
+* target/visual/SetContent/root/Commit), the two-step present ladder, the R6  *
+* pin, the R4 latch, the R2 wait, the D3DKMT vblank wait, and the R5 pace     *
+* thread.  GL pixels enter buffer 0 via WGL_NV_DX_interop2 (dxgi-noflicker    *
+* §5) with a glReadPixels + UpdateSubresource fallback so creation cannot     *
+* fail on interop-less boxes.  NO D2D anywhere: the caption chrome is drawn   *
+* by dwmframe.c in OpenGL into the GL frame BEFORE the fill, so buffer 0      *
+* receives client + chrome in one copy.                                       *
 *                                                                             *
 \*****************************************************************************/
 
@@ -20,7 +22,6 @@
 #include <d3d11.h>
 #include <dxgi1_3.h>
 #include <dxgi1_5.h>
-#include <d2d1_2.h>
 #include <dcomp.h>
 #include <gl/gl.h>
 
@@ -28,7 +29,6 @@
 
 #pragma comment(lib, "d3d11")
 #pragma comment(lib, "dxgi")
-#pragma comment(lib, "d2d1")
 #pragma comment(lib, "dcomp")
 #pragma comment(lib, "gdi32")
 
@@ -168,10 +168,7 @@ struct DXGIPRESENT
     IDXGIFactory2*          factory;
     IDXGISwapChain2*        sc;             /* composition swapchain; NEVER resized */
     ID3D11Texture2D*        backbuf;        /* buffer 0, bound once (flip-model alias) */
-    ID2D1Factory2*          d2dfactory;
-    ID2D1Device1*           d2ddev;
-    ID2D1DeviceContext*     d2dctx;         /* target = buffer 0 bitmap, for the chrome pass */
-    ID2D1Bitmap1*           d2dtarget;
+    ID3D11RenderTargetView* rtv;            /* buffer 0 RTV, bound once (canon MainRTV) */
     IDCompositionDevice*    dcomp;
     IDCompositionTarget*    target;
     IDCompositionVisual*    visual;
@@ -391,29 +388,8 @@ DXGIPRESENT* WINAPI DxgiPresent_Create(HWND hWnd)
      * stays valid for the swapchain's lifetime. */
     if (FAILED(p->sc->GetBuffer(0, IID_PPV_ARGS(&p->backbuf))))
         goto fail;
-
-    {
-        const D2D1_FACTORY_OPTIONS opts = {};
-        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory2), &opts, (void**)&p->d2dfactory)))
-            goto fail;
-        if (FAILED(p->d2dfactory->CreateDevice(p->dxgidev, &p->d2ddev)))
-            goto fail;
-        if (FAILED(p->d2ddev->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &p->d2dctx)))
-            goto fail;
-
-        IDXGISurface2* surface = nullptr;
-        if (FAILED(p->sc->GetBuffer(0, IID_PPV_ARGS(&surface))))
-            goto fail;
-        D2D1_BITMAP_PROPERTIES1 props = {};
-        props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
-        props.pixelFormat.format    = DXGI_FORMAT_B8G8R8A8_UNORM;
-        props.bitmapOptions         = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
-        hr = p->d2dctx->CreateBitmapFromDxgiSurface(surface, &props, &p->d2dtarget);
-        surface->Release();
-        if (FAILED(hr))
-            goto fail;
-        p->d2dctx->SetTarget(p->d2dtarget);
-    }
+    if (FAILED(p->dev->CreateRenderTargetView(p->backbuf, nullptr, &p->rtv)))
+        goto fail;
 
     if (FAILED(DCompositionCreateDevice(p->dxgidev, IID_PPV_ARGS(&p->dcomp))) ||
         FAILED(p->dcomp->CreateTargetForHwnd(hWnd, TRUE, &p->target)) ||
@@ -525,14 +501,11 @@ VOID WINAPI DxgiPresent_Destroy(DXGIPRESENT* p)
     if (p->fbo && s_glDeleteFramebuffers)  s_glDeleteFramebuffers(1, &p->fbo);
     if (p->rbo && s_glDeleteRenderbuffers) s_glDeleteRenderbuffers(1, &p->rbo);
 
-    if (p->d2dtarget)  p->d2dtarget->Release();
-    if (p->d2dctx)     p->d2dctx->Release();
-    if (p->d2ddev)     p->d2ddev->Release();
-    if (p->d2dfactory) p->d2dfactory->Release();
     if (p->visual)     p->visual->Release();
     if (p->target)     p->target->Release();
     if (p->dcomp)      p->dcomp->Release();
     if (p->frame_latency_waitable) CloseHandle(p->frame_latency_waitable);
+    if (p->rtv)        p->rtv->Release();
     if (p->backbuf)    p->backbuf->Release();
     if (p->shared_tex) p->shared_tex->Release();
     if (p->sc)         p->sc->Release();
@@ -560,8 +533,31 @@ BOOL WINAPI DxgiPresent_FillFromGL(DXGIPRESENT* p, int cx, int cy)
     if (cx > p->width)  cx = p->width;
     if (cy > p->height) cy = p->height;
 
+    /* Buffer 0 is desktop-sized and bound once: clear the WHOLE buffer to
+     * transparent before writing the client sub-rect, so everything beyond
+     * the client stays genuinely transparent on the premultiplied swapchain
+     * ("buffer contents beyond the client stay transparent", the canon's
+     * contract).  Without this, a geometry-vs-content mismatch during a
+     * live resize exposes stale pixels from previous frames as a visible
+     * band between the window edge and the GL content. */
+    if (p->rtv)
+    {
+        const float transparent[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        p->ctx->ClearRenderTargetView(p->rtv, transparent);
+    }
+
     if (p->use_interop)
     {
+        /* The GL frame's alpha channel is whatever imgui's blending left
+         * behind — garbage on a premultiplied swapchain (DWM would blend
+         * the window face against the desktop).  Force alpha = 1 across the
+         * frame before the blit; the readback path's 0xFF OR does the same. */
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
         /* Blit the pbuffer's bottom-up image into the shared texture (dst Y
          * inverted -> top-down), then copy the client sub-rect into the
          * once-bound buffer 0. */
@@ -571,8 +567,11 @@ BOOL WINAPI DxgiPresent_FillFromGL(DXGIPRESENT* p, int cx, int cy)
         s_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, p->fbo);
         s_glBlitFramebuffer(0, 0, cx, cy, 0, cy, cx, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         s_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-        s_wglDXUnlockObjectsNV(p->gldev, 1, &p->globj);
+        /* Flush BEFORE releasing the object to D3D: the unlock hands the
+         * texture to the D3D timeline, and the copy below must read THIS
+         * frame's blit, not the previous one. */
         glFlush();
+        s_wglDXUnlockObjectsNV(p->gldev, 1, &p->globj);
 
         const D3D11_BOX box = { 0, 0, 0, (UINT)cx, (UINT)cy, 1 };
         p->ctx->CopySubresourceRegion(p->backbuf, 0, 0, 0, 0, p->shared_tex, 0, &box);
@@ -615,26 +614,6 @@ BOOL WINAPI DxgiPresent_FillFromGL(DXGIPRESENT* p, int cx, int cy)
         p->ctx->UpdateSubresource(p->backbuf, 0, &box, p->rb_flip, (UINT)row, 0);
         return TRUE;
     }
-}
-
-/* ---- chrome bracket (imguiapp DrawCallback slot: D2D over buffer 0) -------------------------------- */
-
-void* WINAPI DxgiPresent_BeginChrome(DXGIPRESENT* p)
-{
-    if (!p || !p->d2dctx)
-        return nullptr;
-    p->d2dctx->BeginDraw();
-    p->d2dctx->SetTransform(D2D1::Matrix3x2F::Identity());
-    p->d2dctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-    p->d2dctx->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    p->d2dctx->SetDpi(96.0f, 96.0f);   /* physical-pixel layout */
-    return p->d2dctx;
-}
-
-VOID WINAPI DxgiPresent_EndChrome(DXGIPRESENT* p)
-{
-    if (p && p->d2dctx)
-        (void)p->d2dctx->EndDraw();
 }
 
 /* ---- present ladder + pin + latch ------------------------------------------------------------------ */
@@ -795,5 +774,3 @@ VOID WINAPI DxgiPresent_PaceTickHandled(DXGIPRESENT* p)
         InterlockedExchange(&p->pace_pending, 0);
 }
 
-void* WINAPI DxgiPresent_GetD3DDevice(DXGIPRESENT* p)  { return p ? (void*)p->dev : nullptr; }
-void* WINAPI DxgiPresent_GetD2DContext(DXGIPRESENT* p) { return p ? (void*)p->d2dctx : nullptr; }

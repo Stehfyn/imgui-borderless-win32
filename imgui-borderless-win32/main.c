@@ -71,6 +71,21 @@ static void draw(HWND hWnd)
 
   cImGui_ImplOpenGL3_NewFrame();
   cImGui_ImplWin32_NewFrame();
+
+  /* Driven size (ImmersiveWindow pending-rect present): during the
+   * WM_NCCALCSIZE pre-geometry repaint the frame must lay out at the size
+   * the window is ABOUT to have — GetClientRect (what the win32 backend
+   * just used for DisplaySize) still reports the old size there. */
+  {
+    SIZE szDriven;
+    if (GetWGLWindowDrivenClientSize(hWnd, &szDriven))
+    {
+      ImGuiViewport* mv = ImGui_GetMainViewport();
+      io->DisplaySize.x = (float)szDriven.cx;
+      io->DisplaySize.y = (float)szDriven.cy;
+      mv->Size = io->DisplaySize;
+    }
+  }
   ImGui_NewFrame();
 
   /* Client == window (dwmframe): the caption band paints over the top capH
@@ -570,14 +585,15 @@ static void Hook_Platform_GetWindowSize(ImGuiViewport* viewport, ImVec2* out_siz
 {
     WGLViewportData* data = Hook_GetViewportData(viewport);
     HWND hwnd = data ? data->Hwnd : Hook_GetHwndFromViewport(viewport);
-    RECT rect = { 0, 0, 0, 0 };
+    SIZE size;
 
     out_size->x = 0.0f;
     out_size->y = 0.0f;
-    if (hwnd && GetClientRect(hwnd, &rect))
+    /* Driven size: pending rgrc[0] (pre-geometry repaint) or the live client. */
+    if (hwnd && GetWGLWindowDrivenClientSize(hwnd, &size))
     {
-        out_size->x = (float)(rect.right - rect.left);
-        out_size->y = (float)(rect.bottom - rect.top);
+        out_size->x = (float)size.cx;
+        out_size->y = (float)size.cy;
     }
 }
 

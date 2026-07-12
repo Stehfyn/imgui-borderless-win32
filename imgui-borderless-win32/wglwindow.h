@@ -160,6 +160,12 @@ WINWGLWINDOWAPI BOOL WINAPI PresentWGLWindow(HWND hWnd);
  * app's subclass must bypass imgui's mouse handler for
  * WM_MOUSEMOVE/WM_LBUTTONUP/WM_CAPTURECHANGED then. */
 WINWGLWINDOWAPI BOOL WINAPI IsWGLWindowCaptionPressActive(HWND hWnd);
+/* The client size the frame being rendered must use: the driven (pending)
+ * rgrc[0] size during the WM_NCCALCSIZE pending-rect repaint, the live
+ * client rect otherwise.  The app's frame sizes imgui from this, never from
+ * GetClientRect, so the pre-geometry frame lays out at the size the window
+ * is ABOUT to have. */
+WINWGLWINDOWAPI BOOL WINAPI GetWGLWindowDrivenClientSize(HWND hWnd, SIZE* psz);
 WINWGLWINDOWAPI BOOL WINAPI IsWGLWindowInSynchronousResizeRender(HWND hWnd);
 WINWGLWINDOWAPI HWND WINAPI GetWGLWindowSynchronousResizeHwnd(HWND hWnd);
 WINWGLWINDOWAPI BOOL WINAPI IsWGLWindowInModalSizeMove(HWND hWnd);
@@ -194,6 +200,13 @@ typedef struct _WGLSURFACE
                              * (WS_EX_NOREDIRECTIONBITMAP windows) */
   DWMFRAME*    frame;       /* caption chrome state, drawn into the
                              * presenter's buffer each present */
+  int          pending_cx;  /* driven client size while the WM_NCCALCSIZE
+                             * pending-rect repaint is on the stack: the
+                             * incoming rgrc[0], rendered BEFORE the window
+                             * manager commits the geometry (ImmersiveWindow
+                             * pending-rect present; the render never
+                             * queries the window).  0 otherwise. */
+  int          pending_cy;
   BOOL         in_frame;    /* app frame on the stack (viewport churn sends
                              * messages here synchronously mid-frame; modal
                              * repaints must not re-enter the frame) */

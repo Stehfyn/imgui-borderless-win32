@@ -821,7 +821,7 @@ ModalRepaintWGL(
     BOOL fVsync,
     BOOL fWaitForVBlank)
 {
-    RECT rc;
+    SIZE sz;
     WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
 
     if (!pwglSurf || !pwglSurf->dxgi || pwglSurf->in_modal_repaint || pwglSurf->in_frame)
@@ -831,9 +831,11 @@ ModalRepaintWGL(
     if (fWaitForVBlank)
       DxgiPresent_WaitForVBlank(pwglSurf->dxgi, hWnd);
 
-    /* Stamp the compositor frame this repaint targets + the size it draws. */
-    GetClientRect(hWnd, &rc);
-    DxgiPresent_StampLatch(pwglSurf->dxgi, RECTWIDTH(rc), RECTHEIGHT(rc));
+    /* Stamp the compositor frame this repaint targets + the size it draws —
+     * the DRIVEN size: the pending rgrc[0] during the WM_NCCALCSIZE
+     * pending-rect repaint, the live client otherwise. */
+    if (GetWGLWindowDrivenClientSize(hWnd, &sz))
+      DxgiPresent_StampLatch(pwglSurf->dxgi, (int)sz.cx, (int)sz.cy);
 
     pwglSurf->modal_present_active = TRUE;
     pwglSurf->modal_restart = fRestart;
@@ -908,13 +910,15 @@ WGLWindow_OnDestroy(
 
     if (pwglSurf)
     {
+      /* GL context current first: the frame's cached chrome textures and the
+       * presenter's interop teardown both need it. */
+      if (pwglSurf->pbdc && pwglSurf->pbrc)
+        wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
       if (pwglSurf->frame)
       {
         DwmFrameDestroy(pwglSurf->frame);
         pwglSurf->frame = NULL;
       }
-      if (pwglSurf->pbdc && pwglSurf->pbrc)
-        wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
       if (pwglSurf->dxgi)
       {
         DxgiPresent_Destroy(pwglSurf->dxgi);
@@ -1136,11 +1140,10 @@ WGLWindow_OnSizing(
 {
     WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
 
-    UNREFERENCED_PARAMETER(prc);
-
     if (pwglSurf)
       pwglSurf->sizing_edge = edge;
-    return TRUE;
+    /* Canon lets DefWindowProc see WM_SIZING (drag-rect min/max enforcement). */
+    return (BOOL)DefWindowProc(hWnd, WM_SIZING, (WPARAM)edge, (LPARAM)prc);
 }
 
 static
@@ -1311,20 +1314,41 @@ WGLWindow_OnNCCalcSize(
       UINT uResult = DwmFrameNCCalcSize(hWnd, fCalcValidRects, lpcsp);
       WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
 
-      /* R1 + R2 (dxgi-noflicker §4): this message runs inside the
+      /* R1 + R2 (dxgi-noflicker §4), pending-rect variant (ImmersiveWindow:
+       * "paint the incoming rgrc[0]").  This message runs inside the
        * SetWindowPos transaction, BEFORE the window manager commits the new
-       * rect.  Repaint (at the current size — the point is ordering, not
-       * prediction; coalesced to one rendered present per compositor frame,
-       * R4), then block until the composition engine has consumed the
-       * update: the geometry commit that follows can never pair with a
-       * stale present.  Pure move loops skip the repaint (the visual
-       * travels with the window). */
-      if (pwglSurf && pwglSurf->dxgi && fCalcValidRects && !pwglSurf->moving)
+       * rect.  R1: render a full frame AT THE SIZE JUST DICTATED in rgrc[0]
+       * and run the (1, 0) ladder — content for the tick queues before the
+       * geometry that accompanies it, ALREADY AT THE NEW SIZE.  R2: Commit +
+       * WaitForCommitCompletion before returning — a compositor frame start
+       * has then passed that latched the R1 present, so the geometry commit
+       * can never overtake its content.  When geometry lands, the latched
+       * content already matches it: the post-geometry WM_WINDOWPOSCHANGED
+       * correction is skipped by R4 (size stamp equal) and R6 stays unarmed
+       * (content size equals the new client) — there is NO post-geometry
+       * render whose latency could expose a mismatched frame.  This is the
+       * canon's protocol made latency-robust: imguiapp renders the CURRENT
+       * size here only because its ~1ms D2D frame lets the R3 correction
+       * beat the next latch; this GL frame cannot, so the fresh content must
+       * be the pre-geometry present itself.
+       * Pure move loops skip (the visual travels with the window); zoomed
+       * passes skip (canon's zoomed branch returns before this leg). */
+      if (pwglSurf && pwglSurf->dxgi && fCalcValidRects && !pwglSurf->moving && !IsZoomed(hWnd))
       {
         GUITHREADINFO gti = { sizeof(gti) };
+        int cx = lpcsp->rgrc[0].right - lpcsp->rgrc[0].left;
+        int cy = lpcsp->rgrc[0].bottom - lpcsp->rgrc[0].top;
 
-        if (!ModalContentCurrentWGL(hWnd))
+        if (cx < 1) cx = 1;
+        if (cy < 1) cy = 1;
+        if (!DxgiPresent_ContentCurrent(pwglSurf->dxgi, cx, cy))
+        {
+          pwglSurf->pending_cx = cx;
+          pwglSurf->pending_cy = cy;
           ModalRepaintWGL(hWnd, TRUE, FALSE, TRUE);
+          pwglSurf->pending_cx = 0;
+          pwglSurf->pending_cy = 0;
+        }
         if (GetGUIThreadInfo(GetCurrentThreadId(), &gti) && gti.hwndMoveSize != NULL)
           DxgiPresent_WaitForCommit(pwglSurf->dxgi);
       }
@@ -1626,10 +1650,19 @@ WGLWindow_OnEraseBkgnd(
     HWND hWnd,
     HDC  hDC)
 {
-    /* TheScratchProgram shape: claim the erase, paint everything in WM_PAINT. */
-    UNREFERENCED_PARAMETER(hWnd);
     UNREFERENCED_PARAMETER(hDC);
 
+    /* Canon (imguiapp WM_ERASEBKGND): validate the update region so the
+     * pending erase never turns into WM_PAINT churn against the presenter. */
+    if (IsDXGIPresentWindow(hWnd))
+    {
+      RECT update = { 0 };
+      GetUpdateRect(hWnd, &update, FALSE);
+      ValidateRect(hWnd, &update);
+      return TRUE;
+    }
+
+    /* TheScratchProgram shape: claim the erase, paint everything in WM_PAINT. */
     return TRUE;
 }
 
@@ -1821,14 +1854,14 @@ WINWGLWINDOWAPI BOOL WINAPI PresentWGLWindow(HWND hWnd)
 
     if (pwglSurf && pwglSurf->dxgi)
     {
-      RECT rc;
       SIZE sz;
       BOOL fRestart;
       BOOL fVsync;
 
-      GetClientRect(hWnd, &rc);
-      sz.cx = RECTWIDTH(rc);
-      sz.cy = RECTHEIGHT(rc);
+      /* Driven size: the pending rgrc[0] during the WM_NCCALCSIZE
+       * pending-rect repaint, the live client rect otherwise. */
+      if (!GetWGLWindowDrivenClientSize(hWnd, &sz))
+        return FALSE;
       if (sz.cx <= 0 || sz.cy <= 0)
         return FALSE;
       sz.cx = CLAMP(sz.cx, 1, pwglSurf->width);
@@ -1836,20 +1869,15 @@ WINWGLWINDOWAPI BOOL WINAPI PresentWGLWindow(HWND hWnd)
 
       if (!wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc))
         return FALSE;
+
+      /* Chrome over the client content — drawn in GL into the same frame,
+       * so the fill below carries client + chrome into buffer 0 in one copy
+       * (one present; no D2D pass). */
+      if (pwglSurf->frame)
+        DwmFrameDrawChrome(pwglSurf->frame, hWnd, sz.cx, sz.cy);
+
       if (!DxgiPresent_FillFromGL(pwglSurf->dxgi, sz.cx, sz.cy))
         return FALSE;
-
-      /* Chrome over the client content, same buffer, same present. */
-      {
-        void* d2dctx = DxgiPresent_BeginChrome(pwglSurf->dxgi);
-        if (d2dctx)
-        {
-          if (pwglSurf->frame)
-            DwmFrameDrawChrome(pwglSurf->frame, hWnd, d2dctx,
-                               DxgiPresent_GetD3DDevice(pwglSurf->dxgi), sz.cx, sz.cy);
-          DxgiPresent_EndChrome(pwglSurf->dxgi);
-        }
-      }
 
       /* Present flavors (dxgi-noflicker §3): the WndProc repaint paths pin
        * their (fRestart, fVsync) pair; everything else is a run-loop frame
@@ -1914,6 +1942,25 @@ WINWGLWINDOWAPI BOOL WINAPI IsWGLWindowCaptionPressActive(HWND hWnd)
 {
     WGLSURFACE* pwglSurf = hWnd ? (WGLSURFACE*)GetWindowLongPtr(hWnd, 0) : NULL;
     return pwglSurf && pwglSurf->frame && DwmFrameButtonPressActive(pwglSurf->frame);
+}
+
+WINWGLWINDOWAPI BOOL WINAPI GetWGLWindowDrivenClientSize(HWND hWnd, SIZE* psz)
+{
+    WGLSURFACE* pwglSurf = hWnd ? (WGLSURFACE*)GetWindowLongPtr(hWnd, 0) : NULL;
+    RECT rc;
+
+    if (!pwglSurf || !psz)
+      return FALSE;
+    if (pwglSurf->pending_cx > 0 && pwglSurf->pending_cy > 0)
+    {
+      psz->cx = pwglSurf->pending_cx;
+      psz->cy = pwglSurf->pending_cy;
+      return TRUE;
+    }
+    GetClientRect(hWnd, &rc);
+    psz->cx = RECTWIDTH(rc);
+    psz->cy = RECTHEIGHT(rc);
+    return TRUE;
 }
 
 WINWGLWINDOWAPI BOOL WINAPI IsWGLWindowInSynchronousResizeRender(HWND hWnd)
