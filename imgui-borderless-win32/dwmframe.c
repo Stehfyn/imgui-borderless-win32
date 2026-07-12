@@ -260,6 +260,17 @@ static void DwfApplyDwmFrame(HWND hwnd)
       if (bb.hRgnBlur)
         (void)DeleteObject(bb.hRgnBlur);
     }
+    if (g_dwfSetAttr)
+    {
+      /* Win11 rounded corners on ALL FOUR (without the attribute DWM rounds
+       * only where extended frame exists: top round, bottom square).  The
+       * rounding and the system ring land ON the face — client == window,
+       * so the window rect IS the content edge.  (Under an INSET client
+       * this attribute rings the outer rect one strip off the face — only
+       * then is it wrong.) */
+      UINT corner = DWF_DWMWCP_ROUND;
+      (void)g_dwfSetAttr(hwnd, DWF_DWMWA_WINDOW_CORNER_PREFERENCE, &corner, (DWORD)sizeof(corner));
+    }
 }
 
 /* ---- GL texture assets ------------------------------------------------------------------------------
