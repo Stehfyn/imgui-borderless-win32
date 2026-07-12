@@ -96,8 +96,21 @@ struct DWMFRAME
     UINT     assetDpi;                /* dpi the glyph/title assets were rasterized at */
     DWFTEX   texIcon;                 /* system icon, BGRA straight alpha */
     DWFTEX   texGlyph[DWFG_COUNT];    /* button glyphs, alpha masks */
-    DWFTEX   texTitle;                /* caption title, alpha mask */
+    DWFTEX   texTitle;                /* caption title: opaque ClearType BGRA strip */
     WCHAR    szTitle[256];            /* text texTitle was rasterized from */
+    COLORREF crTitleText;             /* colors baked into texTitle (ClearType */
+    COLORREF crTitleBack;             /* needs the real background) */
+    /* Cached title rasterization resources: one memory DC, a grow-only DIB,
+     * the caption font for assetDpi, and the reused GL texture id — the
+     * theme/activation crossfade re-rasterizes per tick, which must not
+     * create/destroy GDI or GL objects. */
+    HDC      titleDC;
+    HBITMAP  titleDib;
+    HBITMAP  titleDibPrev;
+    void*    titleBits;
+    int      titleDibW;
+    int      titleDibH;
+    HFONT    titleFont;
 };
 
 /* ---- helpers -------------------------------------------------------------------------------------- */
@@ -377,10 +390,10 @@ static BOOL DwfRasterizeTextAlpha(HFONT hFont, LPCWSTR psz, int cch, DWFTEX* pTe
 }
 
 /* System caption font at the window's dpi (the same font uDWM titles with),
- * grayscale-AA so the mask carries clean coverage.  The height is scaled by
- * DWF_GLYPH_SS: the title rasterizes supersampled and draws at 1:1 scale-
- * down, same as the button glyphs (GDI grayscale AA at caption sizes is
- * visibly quantized). */
+ * at native size with ClearType quality: the title rasterizes as a full-
+ * color strip against the live caption color (subpixel AA cannot ride an
+ * alpha mask — it needs per-channel coverage over a known opaque
+ * background). */
 static HFONT DwfCreateCaptionFont(UINT dpi)
 {
     static NONCLIENTMETRICSW ncm;   /* ~500 bytes: off-stack, GUI thread only (reference remedy) */
@@ -390,10 +403,123 @@ static HFONT DwfCreateCaptionFont(UINT dpi)
     if (!SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(ncm), &ncm, 0, dpi) &&
         !SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(ncm), &ncm, 0))
       return NULL;
-    ncm.lfCaptionFont.lfHeight  = ncm.lfCaptionFont.lfHeight * DWF_GLYPH_SS;
-    ncm.lfCaptionFont.lfWidth   = 0;
-    ncm.lfCaptionFont.lfQuality = ANTIALIASED_QUALITY;
+    ncm.lfCaptionFont.lfQuality = CLEARTYPE_QUALITY;
     return CreateFontIndirectW(&ncm.lfCaptionFont);
+}
+
+/* ClearType caption title: crText on crBack, opaque BGRA strip, through the
+ * frame's CACHED resources (memory DC, grow-only DIB, per-dpi font, reused
+ * GL texture id) — the theme/activation crossfade re-rasterizes per tick.
+ * GDI writes 0 into the DIB alpha channel; forced to 0xFF for the upload
+ * (the strip draws as an opaque quad over the identically-colored band). */
+static BOOL DwfRasterizeTitle(DWMFRAME* f, LPCWSTR psz, int cch, COLORREF crText, COLORREF crBack)
+{
+    HFONT   hOldFont;
+    HBITMAP hOldBmp;
+    SIZE    ext;
+    RECT    rc;
+    int     w;
+    int     h;
+    int     y;
+
+    if (!psz || cch <= 0)
+      return FALSE;
+
+    if (!f->titleDC)
+      f->titleDC = CreateCompatibleDC(NULL);
+    if (!f->titleDC)
+      return FALSE;
+    if (!f->titleFont)
+      f->titleFont = DwfCreateCaptionFont(f->assetDpi ? f->assetDpi : 96u);
+    if (!f->titleFont)
+      return FALSE;
+
+    hOldFont = (HFONT)SelectObject(f->titleDC, f->titleFont);
+    ext.cx = 0;
+    ext.cy = 0;
+    (void)GetTextExtentPoint32W(f->titleDC, psz, cch, &ext);
+    w = (int)ext.cx;
+    h = (int)ext.cy;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (w > 4096) w = 4096;
+    if (h > 256)  h = 256;
+
+    /* Grow-only DIB (stride = titleDibW; the upload declares it via
+     * GL_UNPACK_ROW_LENGTH). */
+    if (!f->titleDib || w > f->titleDibW || h > f->titleDibH)
+    {
+      BITMAPINFO bmi;
+      void*      pBits = NULL;
+      HBITMAP    hDib;
+      int        dw = (w > f->titleDibW) ? w : f->titleDibW;
+      int        dh = (h > f->titleDibH) ? h : f->titleDibH;
+
+      dw = (dw + 63) & ~63;   /* grow in 64px steps */
+      dh = (dh + 15) & ~15;
+
+      ZeroMemory(&bmi, sizeof(bmi));
+      bmi.bmiHeader.biSize        = sizeof(bmi.bmiHeader);
+      bmi.bmiHeader.biWidth       = dw;
+      bmi.bmiHeader.biHeight      = -dh;        /* top-down */
+      bmi.bmiHeader.biPlanes      = 1;
+      bmi.bmiHeader.biBitCount    = 32;
+      bmi.bmiHeader.biCompression = BI_RGB;
+      hDib = CreateDIBSection(f->titleDC, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
+      if (!hDib || !pBits)
+      {
+        if (hDib)
+          (void)DeleteObject(hDib);
+        (void)SelectObject(f->titleDC, hOldFont);
+        return FALSE;
+      }
+      if (f->titleDibPrev)
+        (void)SelectObject(f->titleDC, f->titleDibPrev);
+      if (f->titleDib)
+        (void)DeleteObject(f->titleDib);
+      f->titleDib     = hDib;
+      f->titleBits    = pBits;
+      f->titleDibW    = dw;
+      f->titleDibH    = dh;
+      f->titleDibPrev = (HBITMAP)SelectObject(f->titleDC, f->titleDib);
+    }
+
+    rc.left = 0; rc.top = 0; rc.right = w; rc.bottom = h;
+    (void)SetBkColor(f->titleDC, crBack);
+    (void)SetBkMode(f->titleDC, OPAQUE);
+    (void)SetTextColor(f->titleDC, crText);
+    (void)ExtTextOutW(f->titleDC, 0, 0, ETO_OPAQUE, &rc, psz, (UINT)cch, NULL);
+    (void)GdiFlush();
+    (void)SelectObject(f->titleDC, hOldFont);
+
+    for (y = 0; y < h; ++y)
+    {
+      BYTE* p = (BYTE*)f->titleBits + (SIZE_T)y * (SIZE_T)f->titleDibW * 4u;
+      int   x;
+      for (x = 0; x < w; ++x)
+        p[x * 4 + 3] = 0xFF;
+    }
+
+    if (!f->texTitle.id)
+    {
+      glGenTextures(1, &f->texTitle.id);
+      if (!f->texTitle.id)
+        return FALSE;
+      glBindTexture(GL_TEXTURE_2D, f->texTitle.id);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    else
+      glBindTexture(GL_TEXTURE_2D, f->texTitle.id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, f->titleDibW);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, f->titleBits);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    f->texTitle.w = w;
+    f->texTitle.h = h;
+    return TRUE;
 }
 
 /* Icon glyph font: Segoe Fluent Icons (Win11) / Segoe MDL2 Assets (Win10) --
@@ -441,10 +567,8 @@ static HFONT DwfCreateIconFont(int pxSize)
  * text changed; cheap no-op otherwise. */
 static void DwfEnsureChromeAssets(DWMFRAME* f, HWND hwnd)
 {
-    UINT  dpi  = DwfDpi(hwnd);
-    int   capH = (int)DwmFrameCaptionHeight(hwnd);
-    WCHAR sz[256];
-    int   i;
+    UINT dpi = DwfDpi(hwnd);
+    int  i;
 
     if (dpi != f->assetDpi)
     {
@@ -452,38 +576,29 @@ static void DwfEnsureChromeAssets(DWMFRAME* f, HWND hwnd)
         DwfFreeTex(&f->texGlyph[i]);
       DwfFreeTex(&f->texTitle);
       DwfFreeTex(&f->texIcon);
+      if (f->titleFont)
+      {
+        (void)DeleteObject(f->titleFont);   /* caption font is dpi-sized */
+        f->titleFont = NULL;
+      }
       f->fIconTried = FALSE;
-      f->szTitle[0] = 1;   /* != any real title: forces the re-rasterize below */
+      f->szTitle[0] = 1;   /* != any real title: forces the re-rasterize */
       f->szTitle[1] = 0;
       f->assetDpi   = dpi;
     }
 
     if (!f->texGlyph[DWFG_CLOSE].id)
     {
-      /* Rasterize supersampled; the draw scales down by DWF_GLYPH_SS. */
-      HFONT hFont = DwfCreateIconFont(MulDiv(capH, 36, 100) * DWF_GLYPH_SS);
+      /* Native uDWM caption glyph size: a 10-DIP em (NOT a caption-height
+       * fraction — the SM-stack caption is taller than the shell's 30-DIP
+       * design height and inflates the glyphs).  Rasterized supersampled;
+       * the box filter reduces to 1:1. */
+      HFONT hFont = DwfCreateIconFont(MulDiv(10, (int)dpi, 96) * DWF_GLYPH_SS);
       if (hFont)
       {
         for (i = 0; i < DWFG_COUNT; ++i)
           (void)DwfRasterizeTextAlpha(hFont, &c_dwfGlyphCp[i], 1, &f->texGlyph[i]);
         (void)DeleteObject(hFont);
-      }
-    }
-
-    sz[0] = 0;
-    (void)GetWindowTextW(hwnd, sz, ARRAYSIZE(sz));
-    if (0 != lstrcmpW(sz, f->szTitle))
-    {
-      lstrcpynW(f->szTitle, sz, ARRAYSIZE(f->szTitle));
-      DwfFreeTex(&f->texTitle);
-      if (sz[0])
-      {
-        HFONT hFont = DwfCreateCaptionFont(dpi);
-        if (hFont)
-        {
-          (void)DwfRasterizeTextAlpha(hFont, sz, lstrlenW(sz), &f->texTitle);
-          (void)DeleteObject(hFont);
-        }
       }
     }
 }
@@ -699,13 +814,43 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
       DwfDrawTexGL(&f->texIcon, (float)ix, (float)iy, (float)f->texIcon.w, (float)f->texIcon.h, colWhite);
     }
 
-    /* Caption title (system caption font); starts one caption-height in
-     * (xxxDrawCaptionTemp: rc.left += capH for the icon slot).  The mask is
-     * box-filtered to 1:1; draw at native size, integer-snapped. */
-    if (f->texTitle.id)
+    /* Caption title (system caption font, ClearType): rasterized as an
+     * opaque strip against the LIVE caption color (subpixel AA needs the
+     * real background; the inactive dim pre-blends colText's alpha toward
+     * the band).  Re-rasterized only when title / colors / dpi change —
+     * crossfade ticks re-bake through the frame's cached GDI resources.
+     * Starts one caption-height in (xxxDrawCaptionTemp icon slot); drawn
+     * 1:1, integer-snapped, colors baked (white modulate). */
     {
-      int ty = (capH - f->texTitle.h) / 2;
-      DwfDrawTexGL(&f->texTitle, (float)capH, (float)ty, (float)f->texTitle.w, (float)f->texTitle.h, colText);
+      DWFCOLOR eff;
+      COLORREF crText;
+      COLORREF crBack;
+      WCHAR    sz[256];
+
+      eff.r = colCap.r + (colText.r - colCap.r) * colText.a;
+      eff.g = colCap.g + (colText.g - colCap.g) * colText.a;
+      eff.b = colCap.b + (colText.b - colCap.b) * colText.a;
+      crText = RGB((BYTE)(eff.r * 255.0f + 0.5f), (BYTE)(eff.g * 255.0f + 0.5f), (BYTE)(eff.b * 255.0f + 0.5f));
+      crBack = RGB((BYTE)(colCap.r * 255.0f + 0.5f), (BYTE)(colCap.g * 255.0f + 0.5f), (BYTE)(colCap.b * 255.0f + 0.5f));
+
+      sz[0] = 0;
+      (void)GetWindowTextW(hwnd, sz, ARRAYSIZE(sz));
+      if (0 != lstrcmpW(sz, f->szTitle) || crText != f->crTitleText || crBack != f->crTitleBack)
+      {
+        lstrcpynW(f->szTitle, sz, ARRAYSIZE(f->szTitle));
+        f->crTitleText = crText;
+        f->crTitleBack = crBack;
+        if (sz[0])
+          (void)DwfRasterizeTitle(f, sz, lstrlenW(sz), crText, crBack);
+        else
+          DwfFreeTex(&f->texTitle);
+      }
+
+      if (f->texTitle.id && f->szTitle[0])
+      {
+        int ty = (capH - f->texTitle.h) / 2;
+        DwfDrawTexGL(&f->texTitle, (float)capH, (float)ty, (float)f->texTitle.w, (float)f->texTitle.h, colWhite);
+      }
     }
 
     /* Caption buttons: light/dark, Minimize, Maximize/Restore, Close. */
@@ -758,6 +903,14 @@ VOID WINAPI DwmFrameDestroy(DWMFRAME* f)
       for (i = 0; i < DWFG_COUNT; ++i)
         DwfFreeTex(&f->texGlyph[i]);
     }
+    if (f->titleDC && f->titleDibPrev)
+      (void)SelectObject(f->titleDC, f->titleDibPrev);
+    if (f->titleDib)
+      (void)DeleteObject(f->titleDib);
+    if (f->titleDC)
+      (void)DeleteDC(f->titleDC);
+    if (f->titleFont)
+      (void)DeleteObject(f->titleFont);
     HeapFree(GetProcessHeap(), 0, f);
 }
 
