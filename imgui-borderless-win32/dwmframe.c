@@ -223,7 +223,7 @@ static int DwfButtonRects(HWND hwnd, int cxClient, RECT* prcClose, RECT* prcMax,
  * use. */
 static void DwfApplyDwmFrame(HWND hwnd)
 {
-    union { FARPROC fp; PFN_DWF_EXTEND ex; PFN_DWF_SETATTR sa; } u;
+    union { FARPROC fp; PFN_DWF_EXTEND ex; PFN_DWF_SETATTR sa; PFN_DWF_BLURBEHIND bb; } u;
     DWF_MARGINS m;
 
     if (!g_dwfDwmapi)
@@ -231,23 +231,25 @@ static void DwfApplyDwmFrame(HWND hwnd)
       g_dwfDwmapi = LoadLibraryW(L"dwmapi.dll");
       if (g_dwfDwmapi)
       {
-        u.fp = GetProcAddress(g_dwfDwmapi, "DwmExtendFrameIntoClientArea"); g_dwfExtend  = u.ex;
-        u.fp = GetProcAddress(g_dwfDwmapi, "DwmSetWindowAttribute");        g_dwfSetAttr = u.sa;
+        u.fp = GetProcAddress(g_dwfDwmapi, "DwmExtendFrameIntoClientArea"); g_dwfExtend     = u.ex;
+        u.fp = GetProcAddress(g_dwfDwmapi, "DwmSetWindowAttribute");        g_dwfSetAttr    = u.sa;
+        u.fp = GetProcAddress(g_dwfDwmapi, "DwmEnableBlurBehindWindow");    g_dwfBlurBehind = u.bb;
       }
     }
     if (g_dwfExtend)
     {
-      m.cxLeft = 0; m.cxRight = 0; m.cyTop = 1; m.cyBottom = 0;
+      /* melak47/BorderlessWindow borderless_shadow, verbatim: {1,1,1,1} —
+       * a 1px frame extension on ALL FOUR sides turns on the DWM drop
+       * shadow/border for the whole ring; the opaque composed face (client
+       * == window) paints over every extended pixel.  NEVER sheet-of-glass
+       * (-1) margins: they render as a solid backdrop material on Win11. */
+      m.cxLeft = 1; m.cxRight = 1; m.cyTop = 1; m.cyBottom = 1;
       (void)g_dwfExtend(hwnd, &m);
     }
     if (g_dwfSetAttr)
     {
-      /* Rounded corners + the 1px system border ring.  With client ==
-       * window the ring lands exactly ON the content edge (it floated one
-       * border-width off when the client was inset — the reason this was
-       * once removed).  Without it Win11 rounds only where the extended
-       * frame exists (the 1px top band): top corners round, bottom stay
-       * square, and no border is drawn. */
+      /* Rounded corners + the 1px system border ring, flush on the content
+       * edge (client == window). */
       UINT corner = DWF_DWMWCP_ROUND;
       (void)g_dwfSetAttr(hwnd, DWF_DWMWA_WINDOW_CORNER_PREFERENCE, &corner, (DWORD)sizeof(corner));
     }
@@ -923,17 +925,14 @@ UINT WINAPI DwmFrameNCCalcSize(HWND hwnd, BOOL fCalcValidRects, NCCALCSIZE_PARAM
     if (!fCalcValidRects)
       return 0;
 
-    /* CLIENT == WINDOW, in every state.  rgrc[1] = rgrc[2] is the
-     * reference's "lie to dwm" (no stretch/garbage fill of the grown
-     * region); maximized, the client is the monitor work area EXACTLY
-     * (pairs with DwmFrameGetMinMaxInfo).  No border insets: the composed
-     * face must fill the window rect — the shell does not expand snap zones
-     * by invisible borders for custom frames, so an inset client shows
-     * gutter gaps against snap boundaries and screen edges.  The whole
-     * resize ring synthesizes INSIDE the client edges (DwmFrameHitTest);
-     * the DWM dressing (DwfApplyDwmFrame: {1,1,-1,1} extend + empty-region
-     * blur-behind) supplies shadow + transparency for whatever the content
-     * does not cover. */
+    /* The borderless invariants (melak47/BorderlessWindow;
+     * BorderlessWindow32 "the two lines that matter"): CLIENT == WINDOW —
+     * rgrc[1] = rgrc[2] ("lie to dwm"), and when maximized clamp the client
+     * to the monitor WORK AREA so the window doesn't bleed under the
+     * taskbar.  Nothing else.  The resize ring synthesizes INSIDE the
+     * client edges (DwmFrameHitTest); the shadow comes from the
+     * DwmExtendFrameIntoClientArea{1,1,1,1} dressing the content paints
+     * over. */
     lpcsp->rgrc[1] = lpcsp->rgrc[2];
     if (IsZoomed(hwnd))
     {
@@ -952,10 +951,9 @@ VOID WINAPI DwmFrameGetMinMaxInfo(HWND hwnd, MINMAXINFO* lpMinMaxInfo)
     GUITHREADINFO gti = { sizeof(gti) };
     MONITORINFO   mi  = { sizeof(mi) };
 
-    /* Min track keeps the caption anatomy intact — icon slot (one caption-
-     * height square) + the four buttons; client == window, so no border
-     * terms.  Maximize and max track are EXACTLY the nearest monitor's work
-     * area at its work origin. */
+    /* Min track keeps the caption anatomy intact — icon slot + the four
+     * buttons; client == window, no border terms.  Maximize and max track
+     * are EXACTLY the nearest monitor's work area at its work origin. */
     dpi          = DwfDpi(hwnd);
     button_width = MulDiv(47, (int)dpi, 96);
     caption      = (int)DwmFrameCaptionHeight(hwnd);
@@ -1009,12 +1007,31 @@ UINT WINAPI DwmFrameHitTest(DWMFRAME* f, HWND hwnd, int x, int y)
      * INSIDE the client edges. */
     if (fSizable)
     {
+      /* Client == window (melak47 borderless_hit_test shape): the whole
+       * ring lives INSIDE the client edges, one frame metric thick (8px at
+       * 96dpi).  Corners: within an edge band the corner zone reaches 2x
+       * the metric ALONG the edge (a border-square corner is too small a
+       * target). */
+      int reachX = border.cx * 2;
+      int reachY = border.cy * 2;
+
       row = 1;
       col = 1;
       if (pt.y < border.cy)                        row = 0;
       else if (pt.y >= client.bottom - border.cy)  row = 2;
       if (pt.x < border.cx)                        col = 0;
       else if (pt.x >= client.right - border.cx)   col = 2;
+
+      if (row != 1 && col == 1)
+      {
+        if (pt.x < reachX)                         col = 0;
+        else if (pt.x >= client.right - reachX)    col = 2;
+      }
+      if (col != 1 && row == 1)
+      {
+        if (pt.y < reachY)                         row = 0;
+        else if (pt.y >= client.bottom - reachY)   row = 2;
+      }
 
       if (0 == row)
       {
