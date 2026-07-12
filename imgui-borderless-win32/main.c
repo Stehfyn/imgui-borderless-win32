@@ -466,6 +466,13 @@ static void Hook_GetWin32StyleFromViewportFlags(ImGuiViewportFlags flags, DWORD*
     if (flags & ImGuiViewportFlags_TopMost)
         *out_ex_style |= WS_EX_TOPMOST;
 
+    /* Full WGLWindow, same as the main window: WS_EX_NOREDIRECTIONBITMAP
+     * puts every secondary viewport on the composition-swapchain presenter
+     * (content + geometry latch atomically per compositor frame), instead
+     * of the redirection-surface fallback whose mid-frame repaint blits
+     * stale content on programmatic resize (imgui border-drag flicker). */
+    *out_ex_style |= WS_EX_NOREDIRECTIONBITMAP;
+
     *out_style |= WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
 }
 
@@ -871,23 +878,11 @@ static float Hook_Platform_GetWindowDpiScale(ImGuiViewport* viewport)
 
 static void Hook_Renderer_CreateWindow(ImGuiViewport* viewport)
 {
-    WGLSURFACE* surface;
+    /* GL object sharing is established by the window control at context
+     * creation (every WGLWindow context is born into one share group) —
+     * nothing to patch here. */
     assert(viewport->RendererUserData == NULL);
-
-    surface = Hook_GetViewportSurface(viewport);
-    if (!surface)
-        return;
-
-    if (g_hRC && surface->pbrc && surface->pbrc != g_hRC)
-    {
-        HDC previous_dc = wglGetCurrentDC();
-        HGLRC previous_rc = wglGetCurrentContext();
-        wglMakeCurrent(NULL, NULL);
-        wglShareLists(g_hRC, surface->pbrc);
-        if (previous_rc)
-            wglMakeCurrent(previous_dc, previous_rc);
-    }
-    viewport->RendererUserData = surface;
+    viewport->RendererUserData = Hook_GetViewportSurface(viewport);
 }
 
 static void Hook_Renderer_DestroyWindow(ImGuiViewport* viewport)

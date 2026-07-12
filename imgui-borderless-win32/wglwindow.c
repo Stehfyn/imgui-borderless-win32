@@ -96,6 +96,9 @@ typedef BOOL(WINAPI* PFNWGLDESTROYPBUFFERARBPROC)(HPBUFFERARB);
 typedef BOOL(WINAPI* PFNWGLQUERYPBUFFERARBPROC)(HPBUFFERARB, int, int*);
 typedef BOOL(WINAPI* PFNWGLBINDTEXIMAGEARBPROC)(HPBUFFERARB, int);
 typedef BOOL(WINAPI* PFNWGLRELEASETEXIMAGEARBPROC)(HPBUFFERARB, int);
+/* First WGLWindow pbuffer context: share-group root (see CreateSurface). */
+static HGLRC pbuff_share_root;
+
 PFNWGLSWAPINTERVALEXTPROC      wglSwapIntervalEXT;
 PFNWGLCHOOSEPIXELFORMATARBPROC wglChoosePixelFormatARB;
 PFNWGLCREATEPBUFFERARBPROC     wglCreatePbufferARB;
@@ -537,6 +540,17 @@ CreateSurface(
     if (!pwglSurf->pbrc)
       return FALSE;
 
+    /* One share group for every WGLWindow context, established at BIRTH —
+     * before the presenter's GL⇄DX interop registration puts objects into
+     * the context (wglShareLists fails on a context that already owns
+     * objects; sharing is the window control's job, not the app's).  The
+     * first context is the root; the group outlives it (share groups are
+     * refcounted by member contexts). */
+    if (!pbuff_share_root)
+      pbuff_share_root = pwglSurf->pbrc;
+    else if (!wglShareLists(pbuff_share_root, pwglSurf->pbrc))
+      return FALSE;
+
     wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
     //glReadBuffer(GL_FRONT);
 
@@ -931,7 +945,11 @@ WGLWindow_OnDestroy(
       if (wglGetCurrentContext() == pwglSurf->pbrc)
         wglMakeCurrent(NULL, NULL);
       if (pwglSurf->pbrc)
+      {
+        if (pwglSurf->pbrc == pbuff_share_root)
+          pbuff_share_root = NULL;
         wglDeleteContext(pwglSurf->pbrc);
+      }
       if (pwglSurf->hpb && pwglSurf->pbdc && wglReleasePbufferDCARB)
         wglReleasePbufferDCARB(pwglSurf->hpb, pwglSurf->pbdc);
       if (pwglSurf->hpb && wglDestroyPbufferARB)
@@ -1312,7 +1330,11 @@ WGLWindow_OnNCCreate(
           HeapFree(GetProcessHeap(), 0, pwglSurf);
           return FALSE;
         }
-        pwglSurf->frame = DwmFrameCreate(hWnd);
+        /* Composed caption chrome only for CAPTION windows: undecorated
+         * secondary viewports (WS_POPUP; imgui draws their dressing) get
+         * the presenter but no chrome. */
+        if (GetWindowLongPtr(hWnd, GWL_STYLE) & WS_CAPTION)
+          pwglSurf->frame = DwmFrameCreate(hWnd);
       }
     }
 
@@ -1541,10 +1563,13 @@ WGLWindow_OnGetMinMaxInfo(
     LPMINMAXINFO lpMinMaxInfo)
 {
     if (GetDwmFrame(hWnd) ||
-        (GetWindowLongPtr(hWnd, GWL_EXSTYLE) & WS_EX_NOREDIRECTIONBITMAP))
+        ((GetWindowLongPtr(hWnd, GWL_EXSTYLE) & WS_EX_NOREDIRECTIONBITMAP) &&
+         (GetWindowLongPtr(hWnd, GWL_STYLE) & WS_CAPTION)))
     {
       /* Callable pre-state: the first WM_GETMINMAXINFO arrives during
-       * CreateWindowEx, before WM_NCCREATE allocates the frame. */
+       * CreateWindowEx, before WM_NCCREATE allocates the frame.  Gated on
+       * WS_CAPTION: the caption-anatomy min track would clamp undecorated
+       * secondary viewports (tooltips, popups) far above their real size. */
       DwmFrameGetMinMaxInfo(hWnd, lpMinMaxInfo);
       return;
     }
