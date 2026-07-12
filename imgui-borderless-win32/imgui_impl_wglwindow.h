@@ -12,7 +12,7 @@
  *  - THIS module replaces only the PLATFORM WINDOW interface
  *    (Platform_CreateWindow .. Platform_SwapBuffers), mirroring
  *    imgui_impl_win32's own multi-viewport section function-for-function,
- *    with two documented seams where the composition-swapchain presenter
+ *    with three documented seams where the composition-swapchain presenter
  *    differs from stock Win32 windows:
  *      1. AdjustWindowRect: WGLWindows have NO native frame (WM_NCCALCSIZE:
  *         client == window); the only dressing is the composed caption band
@@ -21,10 +21,15 @@
  *         deferred behind the frame's vblank-latched present (the
  *         presenter's content-first protocol), instead of committed
  *         immediately.
+ *      3. Native caption drags ride imgui's own window-move pipeline
+ *         (g.MovingWindow) instead of the SC_MOVE modal loop, with the drag
+ *         anchor phase-mapped between the true grab point (window move) and
+ *         the imgui title band (dock-payload gate) each frame.
  *
  * Call order (per contract in imgui.h "MULTI-VIEWPORT / PLATFORM INTERFACE"):
  *   init:      cImGui_ImplWin32_Init -> cImGui_ImplOpenGL3_Init ->
  *              ImGui_ImplWGLWindow_Init
+ *   frame:     ImGui_NewFrame -> ImGui_ImplWGLWindow_NewFrame
  *   frame end: ImGui_UpdatePlatformWindows ->
  *              ImGui_ImplWGLWindow_RenderPlatformWindows
  *   shutdown:  cImGui_ImplOpenGL3_Shutdown -> ImGui_ImplWGLWindow_Shutdown ->
@@ -49,6 +54,12 @@ extern "C" {
  * WndProcHandler_PlatformWindow (canonical shape). */
 BOOL ImGui_ImplWGLWindow_Init(HWND hwnd, LPVOID render_fiber);
 VOID ImGui_ImplWGLWindow_Shutdown(VOID);
+
+/* Call AFTER ImGui_NewFrame (unusual for a backend NewFrame; required by
+ * the caption⇄title-band anchor seam: the frame's window move consumes the
+ * true anchor inside ImGui_NewFrame, then this presents the band-mapped
+ * anchor to the frame's dock-payload gate). */
+VOID ImGui_ImplWGLWindow_NewFrame(VOID);
 
 /* Renders and presents every secondary viewport (the sanctioned custom
  * variant of ImGui::RenderPlatformWindowsDefault: same four hooks, same

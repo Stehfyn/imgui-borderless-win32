@@ -298,10 +298,8 @@ static DWORD WINAPI DwfPaceThreadProc(LPVOID param)
 
 /* ---- creation ladder (reference CreateDeviceObjects, verbatim parameters) ------------------------- */
 
-/* The process-wide D3D stack every presenter borrows (accessor-owned
- * singleton, same shape as the GL proc table above): built on first use,
- * lives for the process.  Returns nullptr when no D3D11 device can be
- * created at all. */
+/* The caller-owned D3D stack every presenter borrows (dxgipresent.h):
+ * heap object, no hidden state -- the caller decides where it lives. */
 typedef struct DXGIPRESENTDEVICE
 {
     ID3D11Device*        dev;
@@ -311,56 +309,66 @@ typedef struct DXGIPRESENTDEVICE
     BOOL                 tearing;
 } DXGIPRESENTDEVICE;
 
-static const DXGIPRESENTDEVICE* DxgiPresent_GetSharedDevice(void)
+DXGIPRESENTDEVICE* WINAPI DxgiPresentDevice_Create(VOID)
 {
-    static DXGIPRESENTDEVICE shared;
+    DXGIPRESENTDEVICE* dev = (DXGIPRESENTDEVICE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*dev));
+    if (!dev)
+        return nullptr;
 
-    if (!shared.dev)
+    /* Canonical feature-level array, order preserved: D3D11CreateDevice
+     * takes the FIRST level it can create (10_0-first, the reference's
+     * behavior). */
+    static const D3D_FEATURE_LEVEL c_levels[] =
     {
-        /* Canonical feature-level array, order preserved: D3D11CreateDevice
-         * takes the FIRST level it can create (10_0-first, the reference's
-         * behavior). */
-        static const D3D_FEATURE_LEVEL c_levels[] =
-        {
-            D3D_FEATURE_LEVEL_10_0,
-            D3D_FEATURE_LEVEL_11_0,
-            D3D_FEATURE_LEVEL_11_1,
-            D3D_FEATURE_LEVEL_12_0,
-            D3D_FEATURE_LEVEL_12_1,
-        };
-        const UINT flags = D3D11_DEVICE_AUTHORITATIVE | D3D11_DEVICE_SINGLETHREADED | D3D11_DEVICE_D2D_COMPATIBLE;
-        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
-                                       c_levels, ARRAYSIZE(c_levels), D3D11_SDK_VERSION, &shared.dev, nullptr, &shared.ctx);
-        if (FAILED(hr))
-            hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
-                                   c_levels, ARRAYSIZE(c_levels), D3D11_SDK_VERSION, &shared.dev, nullptr, &shared.ctx);
-        if (FAILED(hr))
-            return nullptr;
-        if (FAILED(shared.dev->QueryInterface(IID_PPV_ARGS(&shared.dxgidev))) ||
-            FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&shared.factory))))
-        {
-            if (shared.dxgidev) { shared.dxgidev->Release(); shared.dxgidev = nullptr; }
-            if (shared.ctx)     { shared.ctx->Release();     shared.ctx = nullptr; }
-            shared.dev->Release();
-            shared.dev = nullptr;
-            return nullptr;
-        }
-
-        IDXGIFactory5* factory5 = nullptr;
-        if (SUCCEEDED(shared.factory->QueryInterface(IID_PPV_ARGS(&factory5))))
-        {
-            BOOL allow = FALSE;
-            if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow, sizeof(allow))))
-                shared.tearing = allow;
-            factory5->Release();
-        }
+        D3D_FEATURE_LEVEL_10_0,
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_12_0,
+        D3D_FEATURE_LEVEL_12_1,
+    };
+    const UINT flags = D3D11_DEVICE_AUTHORITATIVE | D3D11_DEVICE_SINGLETHREADED | D3D11_DEVICE_D2D_COMPATIBLE;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+                                   c_levels, ARRAYSIZE(c_levels), D3D11_SDK_VERSION, &dev->dev, nullptr, &dev->ctx);
+    if (FAILED(hr))
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
+                               c_levels, ARRAYSIZE(c_levels), D3D11_SDK_VERSION, &dev->dev, nullptr, &dev->ctx);
+    if (FAILED(hr))
+    {
+        HeapFree(GetProcessHeap(), 0, dev);
+        return nullptr;
     }
-    return &shared;
+    if (FAILED(dev->dev->QueryInterface(IID_PPV_ARGS(&dev->dxgidev))) ||
+        FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&dev->factory))))
+    {
+        DxgiPresentDevice_Destroy(dev);
+        return nullptr;
+    }
+
+    IDXGIFactory5* factory5 = nullptr;
+    if (SUCCEEDED(dev->factory->QueryInterface(IID_PPV_ARGS(&factory5))))
+    {
+        BOOL allow = FALSE;
+        if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow, sizeof(allow))))
+            dev->tearing = allow;
+        factory5->Release();
+    }
+    return dev;
 }
 
-DXGIPRESENT* WINAPI DxgiPresent_Create(HWND hWnd)
+VOID WINAPI DxgiPresentDevice_Destroy(DXGIPRESENTDEVICE* dev)
 {
-    if (!hWnd)
+    if (!dev)
+        return;
+    if (dev->factory) dev->factory->Release();
+    if (dev->dxgidev) dev->dxgidev->Release();
+    if (dev->ctx)     dev->ctx->Release();
+    if (dev->dev)     dev->dev->Release();
+    HeapFree(GetProcessHeap(), 0, dev);
+}
+
+DXGIPRESENT* WINAPI DxgiPresent_Create(HWND hWnd, DXGIPRESENTDEVICE* dev)
+{
+    if (!hWnd || !dev)
         return nullptr;
 
     DXGIPRESENT* p = (DXGIPRESENT*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*p));
@@ -378,23 +386,17 @@ DXGIPRESENT* WINAPI DxgiPresent_Create(HWND hWnd)
     if (p->width <= 0 || p->height <= 0)
         goto fail;
 
-    /* ONE D3D stack for every presenter: device creation is the dominant
-     * cost of DxgiPresent_Create, and secondary viewports are created
-     * MID-DRAG — a per-window device is a visible hitch.  The swapchain,
-     * the DComp device/target/visual, and the interop registration stay
-     * per-window (DComp Commit is device-wide; the R1-R6 latch protocol
-     * depends on per-window commits).  Each presenter holds its own
-     * references; the shared stack lives for the process. */
-    {
-        const DXGIPRESENTDEVICE* shared = DxgiPresent_GetSharedDevice();
-        if (!shared)
-            goto fail;
-        p->dev = shared->dev;         p->dev->AddRef();
-        p->ctx = shared->ctx;         p->ctx->AddRef();
-        p->dxgidev = shared->dxgidev; p->dxgidev->AddRef();
-        p->factory = shared->factory; p->factory->AddRef();
-        p->tearing = shared->tearing;
-    }
+    /* Borrow the caller's D3D stack: device creation is the dominant cost
+     * of DxgiPresent_Create, and secondary viewports are created MID-DRAG
+     * — a per-window device is a visible hitch.  The swapchain, the DComp
+     * device/target/visual, and the interop registration stay per-window
+     * (DComp Commit is device-wide; the R1-R6 latch protocol depends on
+     * per-window commits).  Each presenter holds its own references. */
+    p->dev = dev->dev;         p->dev->AddRef();
+    p->ctx = dev->ctx;         p->ctx->AddRef();
+    p->dxgidev = dev->dxgidev; p->dxgidev->AddRef();
+    p->factory = dev->factory; p->factory->AddRef();
+    p->tearing = dev->tearing;
 
     {
         DXGI_SWAP_CHAIN_DESC1 desc = {};

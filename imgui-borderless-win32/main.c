@@ -62,6 +62,7 @@ static void draw(HWND hWnd)
     }
   }
   ImGui_NewFrame();
+  ImGui_ImplWGLWindow_NewFrame();
 
   /* Client == window (dwmframe): the caption band paints over the top capH
    * pixels; inset the viewport work area so the dockspace and any windows

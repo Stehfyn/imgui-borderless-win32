@@ -32,6 +32,7 @@
 #include "imgui_impl_wglwindow.h"
 
 #include "dcimgui.h"
+#include "dcimgui_internal.h"   /* ImGui_StartMouseMovingWindow, ImGuiViewportP (native caption drag hand-off) */
 #include "backends/dcimgui_impl_win32.h"
 
 /* ---- backend data (io.BackendPlatformUserData is owned by imgui_impl_win32,
@@ -55,6 +56,10 @@ typedef struct ImGui_ImplWGLWindow_ViewportData
     int   PendingY;
     int   PendingCx;
     int   PendingCy;
+
+    /* Native caption press queued for hand-off to imgui's window-move
+     * pipeline (see WM_NCLBUTTONDOWN); consumed in Platform_UpdateWindow. */
+    BOOL  CaptionMoveQueued;
 } ImGui_ImplWGLWindow_ViewportData;
 
 typedef struct ImGui_ImplWGLWindow_Data
@@ -66,6 +71,20 @@ typedef struct ImGui_ImplWGLWindow_Data
      * main-viewport destruction chains to it so it can free ITS ViewportData
      * (stored in the main viewport's PlatformUserData). */
     void (*Win32_Platform_DestroyWindow)(ImGuiViewport* viewport);
+
+    /* Seam 3: native caption ⇄ imgui title band.  A caption drag anchors
+     * ABOVE the imgui window (negative y), which is geometrically true for
+     * the move (UpdateMouseMovingWindowNewFrame: pos = mouse - anchor; the
+     * true anchor keeps the grab point exact) but sits outside the dock
+     * gate's title band (BeginDockableDragDropSource requires the anchor
+     * within (0,0)-(SizeFull.x, FrameHeight) to arm the dock payload).
+     * Both readers share g.ActiveIdClickOffset at DIFFERENT frame phases:
+     * the move reads it inside ImGui_NewFrame, the gate inside the app's
+     * Begin.  ImGui_ImplWGLWindow_NewFrame (called between them) presents
+     * the band-mapped anchor to the gate; RenderPlatformWindows (after the
+     * frame) restores the true anchor for the next move. */
+    ImGuiWindow* CaptionDragWindow;
+    ImVec2       CaptionDragAnchor;   /* true anchor (y < 0) */
 } ImGui_ImplWGLWindow_Data;
 
 static ImGui_ImplWGLWindow_Data* ImGui_ImplWGLWindow_GetBackendData(void)
@@ -260,6 +279,41 @@ static void ImGui_ImplWGLWindow_UpdateWindow(ImGuiViewport* viewport)
 
     if (!vd || !vd->Hwnd)
         return;
+
+    /* Native caption press → imgui window move (see WM_NCLBUTTONDOWN).
+     * The press was queued to imgui's INPUT QUEUE; the trickle rules
+     * (UpdateInputEvents) defer a mouse-button event to the frame AFTER
+     * any mouse-pos event, so the down may not be visible to io.MouseDown
+     * yet — hold the hand-off until imgui has processed it (drag anchor
+     * MouseClickedPos[0] is only current then).  A press released before
+     * imgui saw it is abandoned. */
+    if (vd->CaptionMoveQueued)
+    {
+        ImGuiWindow* window = ((ImGuiViewportP*)viewport)->Window;
+        if (window && ImGui_GetIO()->MouseDown[0])
+        {
+            ImGui_ImplWGLWindow_Data* bd = ImGui_ImplWGLWindow_GetBackendData();
+            ImGuiContext* ctx = ImGui_GetCurrentContext();
+
+            vd->CaptionMoveQueued = FALSE;
+            ImGui_StartMouseMovingWindow(window);
+            /* The press landed on the native caption — outside every imgui
+             * window — so UpdateHoveredWindowAndCaptureFlags stamped the
+             * click APPLICATION-owned (io.MouseDownOwned[0] = false), which
+             * suppresses HoveredWindowUnderMovingWindow (the seed of every
+             * dock target) for the whole hold.  This click starts an imgui
+             * window move: imgui owns it. */
+            ImGui_GetIO()->MouseDownOwned[0] = true;
+            /* Seam 3: remember the true anchor for the frame-phase mapping
+             * (ImGui_ImplWGLWindow_NewFrame / RenderPlatformWindows). */
+            bd->CaptionDragWindow = window;
+            bd->CaptionDragAnchor = ctx->ActiveIdClickOffset;
+        }
+        else if (!window || !(GetKeyState(VK_LBUTTON) & 0x8000))
+        {
+            vd->CaptionMoveQueued = FALSE;
+        }
+    }
 
     /* Owner update (canonical: GWLP_HWNDPARENT, never ::SetParent). */
     next_parent = ImGui_ImplWGLWindow_GetHwndFromViewport(viewport->ParentViewport);
@@ -591,6 +645,7 @@ static LRESULT CALLBACK ImGui_ImplWGLWindow_WndProcHandler_PlatformWindow(HWND h
     viewport = ImGui_FindViewportByPlatformHandle((void*)hWnd);
     if (viewport)
     {
+        ImGui_ImplWGLWindow_ViewportData* vd = (ImGui_ImplWGLWindow_ViewportData*)viewport->PlatformUserData;
         switch (uMsg)
         {
         case WM_CLOSE:
@@ -618,6 +673,31 @@ static LRESULT CALLBACK ImGui_ImplWGLWindow_WndProcHandler_PlatformWindow(HWND h
                 viewport->PlatformRequestResize = true;
             break;
         }
+        case WM_NCLBUTTONDOWN:
+            /* Native caption drags hand off to imgui's window-move pipeline
+             * (g.MovingWindow) instead of DefWindowProc's SC_MOVE modal
+             * loop.  The modal loop pins the drag to THIS platform window's
+             * lifetime, but imgui transfers a moving window into a hovered
+             * host viewport MID-drag (WindowSelectViewport) and then
+             * destroys this window — killing the loop and cancelling the
+             * user's drag.  imgui's own move pipeline is what undecorated
+             * viewports ride: platform-window-lifetime independent, live
+             * mid-drag merge both directions, dock targets.  The press is
+             * fed through the shared handler (capture + click bookkeeping);
+             * the hand-off happens next Platform_UpdateWindow, after imgui
+             * has processed the click (MouseClickedPos must be current
+             * before StartMouseMovingWindow computes the drag offset). */
+            if (wParam == HTCAPTION && vd && vd->HwndOwned)
+            {
+                POINT pt;
+                pt.x = GET_X_LPARAM(lParam);
+                pt.y = GET_Y_LPARAM(lParam);
+                ScreenToClient(hWnd, &pt);
+                cImGui_ImplWin32_WndProcHandler(hWnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(pt.x, pt.y));
+                vd->CaptionMoveQueued = TRUE;
+                return 0;
+            }
+            break;
         case WM_NCCALCSIZE:
             /* Seam 2, native drags: the window control renders this window
              * at the PENDING size inside this message (pre-geometry
@@ -644,6 +724,29 @@ static LRESULT CALLBACK ImGui_ImplWGLWindow_WndProcHandler_PlatformWindow(HWND h
     }
 
     return DefWGLWindowProc(hWnd, uMsg, wParam, lParam);
+}
+
+/* ---- per-frame anchor mapping (seam 3) ----------------------------------- */
+
+/* Call AFTER ImGui_NewFrame: the window move consumed the TRUE anchor
+ * (UpdateMouseMovingWindowNewFrame ran inside NewFrame — grab point exact);
+ * present the band-mapped anchor to this frame's readers (the dock gate in
+ * BeginDockableDragDropSource, reached from the app's Begin). */
+VOID ImGui_ImplWGLWindow_NewFrame(VOID)
+{
+    ImGui_ImplWGLWindow_Data* bd = ImGui_ImplWGLWindow_GetBackendData();
+    ImGuiContext* ctx = ImGui_GetCurrentContext();
+
+    if (!bd->CaptionDragWindow || !ctx)
+        return;
+    if (ctx->MovingWindow != bd->CaptionDragWindow)
+    {
+        /* Drag over (released, or the move was taken over elsewhere). */
+        bd->CaptionDragWindow = NULL;
+        return;
+    }
+    ctx->ActiveIdClickOffset.x = bd->CaptionDragAnchor.x;
+    ctx->ActiveIdClickOffset.y = 0.0f;   /* caption ⇒ title band */
 }
 
 /* ---- render-all-windows + deferred commit flush -------------------------- */
@@ -729,6 +832,21 @@ VOID ImGui_ImplWGLWindow_RenderPlatformWindows(HWND sync_resize_hwnd)
         vd->PendingMove = FALSE;
         vd->PendingSize = FALSE;
     }
+
+    /* Seam 3, restore phase: this frame's gate readers are done — put the
+     * TRUE anchor back so next NewFrame's window move keeps the grab point
+     * exact (zero jump). */
+    {
+        ImGui_ImplWGLWindow_Data* bd = ImGui_ImplWGLWindow_GetBackendData();
+        ImGuiContext* ctx = ImGui_GetCurrentContext();
+        if (bd->CaptionDragWindow && ctx)
+        {
+            if (ctx->MovingWindow == bd->CaptionDragWindow)
+                ctx->ActiveIdClickOffset = bd->CaptionDragAnchor;
+            else
+                bd->CaptionDragWindow = NULL;
+        }
+    }
 }
 
 /* ---- init / shutdown ------------------------------------------------------ */
@@ -759,6 +877,19 @@ static void ImGui_ImplWGLWindow_InitMultiViewportSupport(void)
      * chain to the owner of the main viewport's ViewportData, then replace
      * the window-management set with ours. */
     bd->Win32_Platform_DestroyWindow = platform_io->Platform_DestroyWindow;
+
+    /* io.MouseHoveredViewport: imgui_impl_win32 feeds it from WindowFromPoint,
+     * relying on the WM_NCHITTEST/HTTRANSPARENT walk to skip the dragged
+     * (NoInputs) viewport.  Over composition-swapchain WGLWindows the walk
+     * returns the dragged window anyway; the input backend's NoInputs guard
+     * then reports NO hovered viewport, and core has no fallback when a
+     * backend claims this capability but reports 0 (UpdateViewportsNewFrame,
+     * "This is essentially broken" FIXME) — g.MouseViewport stays pinned to
+     * the dragged viewport: no dock targets, no live merge.  The capability
+     * is OPTIONAL; clearing it selects core's own viewport-under-mouse
+     * search (FindHoveredViewportFromPlatformWindowStack), which honors
+     * NoInputs by construction. */
+    ImGui_GetIO()->BackendFlags &= ~ImGuiBackendFlags_HasMouseHoveredViewport;
 
     platform_io->Platform_CreateWindow = ImGui_ImplWGLWindow_CreateWindow;
     platform_io->Platform_DestroyWindow = ImGui_ImplWGLWindow_DestroyWindow;

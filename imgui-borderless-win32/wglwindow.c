@@ -126,6 +126,11 @@ typedef struct _WGLCLASSSTATE
   HWND sync_resize_hwnd;
   LONG sync_resize_depth;
 
+  /* The one D3D stack every window's presenter borrows (dxgipresent.h says
+   * the caller owns it; the window class is the caller).  Built at the
+   * first presenter-backed window, lives as long as the class. */
+  struct DXGIPRESENTDEVICE* dxgi_device;
+
 } WGLCLASSSTATE, *PWGLCLASSSTATE;
 
 static
@@ -1362,7 +1367,12 @@ WGLWindow_OnNCCreate(
          * draws all of its own UI, so it loses nothing. */
         SetWindowTheme(hWnd, L" ", L" ");
 
-        pwglSurf->dxgi = DxgiPresent_Create(hWnd);
+        {
+          WGLCLASSSTATE* state = GetWGLClassState(hWnd);
+          if (state && !state->dxgi_device)
+            state->dxgi_device = DxgiPresentDevice_Create();
+          pwglSurf->dxgi = state ? DxgiPresent_Create(hWnd, state->dxgi_device) : NULL;
+        }
         if (!pwglSurf->dxgi)
         {
           SetWindowLongPtr(hWnd, 0, 0);
