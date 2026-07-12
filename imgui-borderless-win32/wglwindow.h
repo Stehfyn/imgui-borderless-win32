@@ -116,11 +116,12 @@ WINWGLWINDOWAPI VOID WINAPI InitWGLControls(VOID);
 #define WGLWINDOW_CLASS        "WGLWindow"
 #endif
 //#define BCS_WINDOW              (WS_DLGFRAME | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_BORDER | WS_SYSMENU | WS_POPUP)
-/* melak47/BorderlessWindow aero_borderless, verbatim: WS_CAPTION stays — the
- * DWM treats captioned windows as real top-levels (shadow, rounding, snap,
- * minimize animations); its visuals never draw because WM_NCCALCSIZE eats
- * the whole frame (client == window). */
-#define BCS_WINDOW              (WS_POPUP | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
+/* OVERLAPPED base (== WS_OVERLAPPEDWINDOW): the shell's full native-frame
+ * treatment — snap-zone rects EXPANDED by the invisible borders (WS_POPUP
+ * windows get the raw zone rect: the snapped face then gaps against the
+ * monitor edge/taskbar), native maximize overhang, minimize animations.
+ * WS_CAPTION's visuals never draw because WM_NCCALCSIZE eats the frame. */
+#define BCS_WINDOW              (WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
 
   /*
    * OpenGL window class

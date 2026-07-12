@@ -949,56 +949,46 @@ VOID WINAPI DwmFrameDestroy(DWMFRAME* f)
 
 UINT WINAPI DwmFrameNCCalcSize(HWND hwnd, BOOL fCalcValidRects, NCCALCSIZE_PARAMS* lpcsp)
 {
-    LONG top;
-
-    /* Invisible-border topology, with the system TOLD about the frame: the
-     * standard NC is computed by DEFWINDOWPROC — USER/DWM then classify the
-     * left/right/bottom strips as real invisible resize borders, so
-     * DWMWA_EXTENDED_FRAME_BOUNDS excludes them and snap zones / shadow /
-     * peek align to the VISIBLE face (hand-added insets are anonymous NC
-     * the system cannot attribute — snap gaps).  Only the top is restored:
-     * caption + top border become client (our chrome; the top resize band
-     * rides inside via the hit test).  Maximized, the client is the monitor
-     * work area EXACTLY (pairs with DwmFrameGetMinMaxInfo).  rgrc[1] =
-     * rgrc[2] is the "lie to dwm", applied AFTER DefWindowProc rewrites the
-     * valid rects. */
     if (!fCalcValidRects)
-      return (UINT)DefWindowProcW(hwnd, WM_NCCALCSIZE, FALSE, (LPARAM)lpcsp);
+      return 0;
 
-    top = lpcsp->rgrc[0].top;
-    (void)DefWindowProcW(hwnd, WM_NCCALCSIZE, TRUE, (LPARAM)lpcsp);
-    lpcsp->rgrc[0].top = top;
+    /* CLIENT == WINDOW, in every state — the borderless invariants and
+     * nothing else: rgrc[1] = rgrc[2] ("lie to dwm"); maximized, clamp the
+     * client to the monitor WORK AREA (pairs with DwmFrameGetMinMaxInfo).
+     * MEASURED TWICE (snapprobe 2026-07-12, hand-inset NC and DefWindowProc
+     * NC): this window's snap rects arrive zone-EXACT and its extended
+     * frame bounds always equal the window rect — the system never
+     * classifies its NC as invisible borders, so ANY client inset gaps
+     * against snap boundaries by exactly the inset.  The face must fill the
+     * window rect; the resize ring synthesizes INSIDE the client edges. */
+    lpcsp->rgrc[1] = lpcsp->rgrc[2];
     if (IsZoomed(hwnd))
     {
       MONITORINFO mi = { sizeof(mi) };
       if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
         lpcsp->rgrc[0] = mi.rcWork;
     }
-    lpcsp->rgrc[1] = lpcsp->rgrc[2];
     return 0;
 }
 
 VOID WINAPI DwmFrameGetMinMaxInfo(HWND hwnd, MINMAXINFO* lpMinMaxInfo)
 {
-    UINT          dpi;
-    int           button_width;
-    int           caption;
+    UINT dpi;
+    int  button_width;
+    int  caption;
+
     GUITHREADINFO gti = { sizeof(gti) };
     MONITORINFO   mi  = { sizeof(mi) };
 
-    /* Min track keeps the caption anatomy intact — icon slot + the four
-     * buttons + the invisible left/right strips; height = caption + the
-     * bottom strip.  Maximize and max track are EXACTLY the nearest
-     * monitor's work area at its work origin. */
-    {
-      SIZE border;
-      DwfWindowBorders(hwnd, &border);
-      dpi          = DwfDpi(hwnd);
-      button_width = MulDiv(47, (int)dpi, 96);
-      caption      = (int)DwmFrameCaptionHeight(hwnd);
-      lpMinMaxInfo->ptMinTrackSize.x = caption + 4 * button_width + 2 * border.cx;
-      lpMinMaxInfo->ptMinTrackSize.y = caption + border.cy;
-    }
+    /* Min track keeps the caption anatomy intact (icon slot + the four
+     * buttons; client == window, no border terms).  Maximize and max track
+     * are EXACTLY the nearest monitor's work area at its work origin —
+     * pairs with the zoomed WM_NCCALCSIZE work-area clamp. */
+    dpi          = DwfDpi(hwnd);
+    button_width = MulDiv(47, (int)dpi, 96);
+    caption      = (int)DwmFrameCaptionHeight(hwnd);
+    lpMinMaxInfo->ptMinTrackSize.x = caption + 4 * button_width;
+    lpMinMaxInfo->ptMinTrackSize.y = caption;
 
     /* Mid move-size loop: leave the max fields alone (reference behavior). */
     if (GetGUIThreadInfo(GetCurrentThreadId(), &gti) && gti.hwndMoveSize == hwnd)
@@ -1047,20 +1037,18 @@ UINT WINAPI DwmFrameHitTest(DWMFRAME* f, HWND hwnd, int x, int y)
      * INSIDE the client edges. */
     if (fSizable)
     {
-      /* Invisible-border ring: left/right/bottom live OUTSIDE the client
-       * (the NCCALCSIZE strips — pt.x < 0 / pt.x >= client.right /
-       * pt.y >= client.bottom); only the top band rides INSIDE.  Corners:
-       * within an edge band the corner zone reaches 2x the metric ALONG the
-       * edge. */
+      /* Client == window: the whole resize ring lives INSIDE the client
+       * edges, one frame metric thick.  Corners: within an edge band the
+       * corner zone reaches 2x the metric ALONG the edge. */
       int reachX = border.cx * 2;
       int reachY = border.cy * 2;
 
       row = 1;
       col = 1;
       if (pt.y < border.cy)                        row = 0;
-      else if (pt.y >= client.bottom)              row = 2;
-      if (pt.x < 0)                                col = 0;
-      else if (pt.x >= client.right)               col = 2;
+      else if (pt.y >= client.bottom - border.cy)  row = 2;
+      if (pt.x < border.cx)                        col = 0;
+      else if (pt.x >= client.right - border.cx)   col = 2;
 
       if (row != 1 && col == 1)
       {
