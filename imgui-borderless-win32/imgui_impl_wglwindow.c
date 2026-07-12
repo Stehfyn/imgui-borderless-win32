@@ -116,17 +116,20 @@ static void ImGui_ImplWGLWindow_GetWin32StyleFromViewportFlags(ImGuiViewportFlag
 /* Seam 1: content rect -> window rect.  WGLWindows have NO native frame
  * (WM_NCCALCSIZE: client == window); decorated windows carry the composed
  * caption band INSIDE the client. */
+static LONG ImGui_ImplWGLWindow_GetChromeInset(ImGuiViewport* viewport, HWND hwnd);
+
 static void ImGui_ImplWGLWindow_AdjustWindowRect(ImGuiViewport* viewport, RECT* rect, DWORD style, DWORD ex_style)
 {
+    /* Keyed on ACTUAL chrome presence (same predicate as GetWindowPos/Size)
+     * so flag and frame can never disagree; the window control creates and
+     * destroys the frame as WS_CAPTION comes and goes.  At CreateWindow
+     * time (no hwnd yet) the inset is 0 and the post-create forced
+     * Platform_SetWindowPos/Size corrects the rect — canonical behavior
+     * (imgui clears LastPlatformPos/Size to enforce those calls). */
+    ImGui_ImplWGLWindow_ViewportData* vd = ImGui_ImplWGLWindow_GetViewportData(viewport);
     UNREFERENCED_PARAMETER(style);
     UNREFERENCED_PARAMETER(ex_style);
-    if (viewport == ImGui_GetMainViewport())
-        return;
-    if (!(viewport->Flags & ImGuiViewportFlags_NoDecoration))
-    {
-        ImGui_ImplWGLWindow_ViewportData* vd = ImGui_ImplWGLWindow_GetViewportData(viewport);
-        rect->top -= (LONG)DwmFrameCaptionHeight(vd ? vd->Hwnd : NULL);
-    }
+    rect->top -= ImGui_ImplWGLWindow_GetChromeInset(viewport, vd ? vd->Hwnd : NULL);
 }
 
 static void ImGui_ImplWGLWindow_UpdateWin32StyleFromWindow(ImGui_ImplWGLWindow_ViewportData* vd)
@@ -586,6 +589,15 @@ static LRESULT CALLBACK ImGui_ImplWGLWindow_WndProcHandler_PlatformWindow(HWND h
         case WM_SIZE:
             viewport->PlatformRequestResize = true;
             break;
+        case WM_NCCALCSIZE:
+            /* Seam 2, native drags: the window control renders this window
+             * at the PENDING size inside this message (pre-geometry
+             * repaint).  Canon flags the resize at WM_SIZE — post-geometry,
+             * too late for that frame — so flag it here and the repaint
+             * frame pulls the driven size through Platform_GetWindowSize. */
+            if (wParam)
+                viewport->PlatformRequestResize = true;
+            break;
         case WM_MOUSEACTIVATE:
             if (viewport->Flags & ImGuiViewportFlags_NoFocusOnClick)
                 return MA_NOACTIVATE;
@@ -674,6 +686,16 @@ VOID ImGui_ImplWGLWindow_RenderPlatformWindows(HWND sync_resize_hwnd)
         if (!vd->PendingMove) flags |= SWP_NOMOVE;
         if (!vd->PendingSize) flags |= SWP_NOSIZE;
         SetWindowPos(vd->Hwnd, NULL, vd->PendingX, vd->PendingY, vd->PendingCx, vd->PendingCy, flags);
+
+        /* Cancel the commit's own WM_MOVE/WM_SIZE echo: canon's commits run
+         * inside UpdatePlatformWindows, where ClearRequestFlags() wipes the
+         * echo in the same iteration.  This deferred commit runs after
+         * that, so a surviving echo would gate WindowSyncOwnedViewport's
+         * window->viewport sync next frame (the mid-drag size fight).
+         * Everything delivered synchronously by this SetWindowPos is ours,
+         * not the OS's. */
+        viewport->PlatformRequestMove = false;
+        viewport->PlatformRequestResize = false;
 
         vd->PendingMove = FALSE;
         vd->PendingSize = FALSE;

@@ -82,6 +82,12 @@
 #define DWMWA_ALLOW_NCPAINT_VALUE       (4)
 #define DWMWA_PASSIVE_UPDATE_MODE_VALUE (16)
 
+/* void Cls_OnStyleChanged(HWND hwnd, int nType, const STYLESTRUCT* lpss) */
+#define HANDLE_WM_STYLECHANGED(hwnd, wParam, lParam, fn) \
+        ((fn)((hwnd), (int)(wParam), (const STYLESTRUCT*)(lParam)), 0L)
+#define FORWARD_WM_STYLECHANGED(hwnd, nType, lpss, fn) \
+        (void)(fn)((hwnd), WM_STYLECHANGED, (WPARAM)(int)(nType), (LPARAM)(const STYLESTRUCT*)(lpss))
+
 /* void Cls_OnCaptureChanged(HWND hwnd, HWND hwndNewCapture) */
 #define HANDLE_WM_CAPTURECHANGED(hwnd, wParam, lParam, fn) \
         ((fn)((hwnd), (HWND)(lParam)), 0L)
@@ -1200,6 +1206,39 @@ WGLWindow_OnDwmNCRenderingChanged(
     }
 }
 
+/* Composed chrome tracks WS_CAPTION across runtime style changes (imgui
+ * viewport decoration toggles restyle live windows: WS_POPUP <->
+ * WS_OVERLAPPEDWINDOW via SetWindowLong + SWP_FRAMECHANGED). */
+static
+VOID PFORCEINLINE CALLBACK
+WGLWindow_OnStyleChanged(
+    HWND               hWnd,
+    int                nType,
+    const STYLESTRUCT* lpss)
+{
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
+
+    if (pwglSurf && pwglSurf->dxgi && GWL_STYLE == nType && lpss)
+    {
+      BOOL fCaption = (lpss->styleNew & WS_CAPTION) == WS_CAPTION;
+
+      if (fCaption && !pwglSurf->frame)
+      {
+        pwglSurf->frame = DwmFrameCreate(hWnd);
+      }
+      else if (!fCaption && pwglSurf->frame)
+      {
+        /* GL context current: the frame's cached chrome textures need it. */
+        if (pwglSurf->pbdc && pwglSurf->pbrc)
+          wglMakeCurrent(pwglSurf->pbdc, pwglSurf->pbrc);
+        DwmFrameDestroy(pwglSurf->frame);
+        pwglSurf->frame = NULL;
+      }
+    }
+
+    FORWARD_WM_STYLECHANGED(hWnd, nType, lpss, DefWindowProc);
+}
+
 static
 VOID PFORCEINLINE CALLBACK
 WGLWindow_OnDpiChanged(
@@ -2107,6 +2146,7 @@ WINWGLWINDOWAPI LRESULT CALLBACK DefWGLWindowProc(HWND hWnd, UINT uMsg, WPARAM w
     HANDLE_MSG(hWnd, WM_SIZING, WGLWindow_OnSizing);
     HANDLE_MSG(hWnd, WM_MOVING, WGLWindow_OnMoving);
     HANDLE_MSG(hWnd, DXGIPRESENT_WM_PACE, WGLWindow_OnDxgiPace);
+    HANDLE_MSG(hWnd, WM_STYLECHANGED, WGLWindow_OnStyleChanged);
     HANDLE_MSG(hWnd, WM_DPICHANGED, WGLWindow_OnDpiChanged);
     HANDLE_MSG(hWnd, WM_DWMNCRENDERINGCHANGED, WGLWindow_OnDwmNCRenderingChanged);
     HANDLE_MSG(hWnd, WM_SYSCOMMAND, WGLWindow_OnSysCommand);

@@ -77,6 +77,13 @@ static PFN_DWF_EXTEND      g_dwfExtend;
 static PFN_DWF_SETATTR     g_dwfSetAttr;
 static PFN_DWF_BLURBEHIND  g_dwfBlurBehind;
 
+/* The light/dark THEME is app-global: one shared state every frame converges
+ * to (each with its own 160ms crossfade at its next draw) — a caption button
+ * on ANY window re-themes them all.  New frames seed from it. */
+static BOOL                dwf_theme_dark = TRUE;
+
+static void DwfBeginTransition(struct DWMFRAME* f, HWND hwnd, BOOL fDarkTo, BOOL fActiveTo);
+
 #define DWF_ANIM_TIMER_ID  ((UINT_PTR)0x0DF00001u)
 #define DWF_ANIM_INTERVAL  8u
 #define DWF_ANIM_DURATION  160u
@@ -1011,6 +1018,11 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
     if (!f || cx <= 0 || cy <= 0)
       return;
 
+    /* Converge to the app-global theme (a caption button on another window
+     * may have flipped it): same crossfade as a local commit. */
+    if (f->fDark != dwf_theme_dark)
+      DwfBeginTransition(f, hwnd, dwf_theme_dark, f->fWndActive);
+
     capH    = (int)DwmFrameCaptionHeight(hwnd);
     fDark   = f->fDark;
     fActive = f->fWndActive;
@@ -1156,7 +1168,7 @@ DWMFRAME* WINAPI DwmFrameCreate(HWND hwnd)
     if (!f)
       return NULL;
     f->hwnd       = hwnd;
-    f->fDark      = TRUE;    /* app style is dark; seed before the first paint */
+    f->fDark      = dwf_theme_dark;   /* seed from the app-global theme */
     f->fWndActive = TRUE;
 
     DwfApplyDwmFrame(hwnd);
@@ -1416,7 +1428,8 @@ static void DwfButtonAction(DWMFRAME* f, HWND hwnd, int id)
     case DWB_MAX:       (void)PostMessageW(hwnd, WM_SYSCOMMAND, IsZoomed(hwnd) ? SC_RESTORE : SC_MAXIMIZE, 0); break;
     case DWB_CLOSE:     (void)PostMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0); break;
     case DWB_LIGHTDARK:
-      DwfBeginTransition(f, hwnd, !f->fDark, f->fWndActive);
+      dwf_theme_dark = !f->fDark;      /* commit the app-global theme */
+      DwfBeginTransition(f, hwnd, dwf_theme_dark, f->fWndActive);
       if (f->pfnTheme)
         f->pfnTheme(hwnd, f->fDark);   /* fDark already flipped by the transition */
       break;
