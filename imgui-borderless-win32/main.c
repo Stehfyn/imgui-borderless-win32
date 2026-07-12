@@ -268,10 +268,21 @@ static LRESULT CALLBACK ImGuiSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
     if (ctx)
         ImGui_SetCurrentContext(ctx);
 
+    /* Teardown tail: the final DestroyWindow(main) runs AFTER
+     * ImGui_DestroyContext — its WM_DESTROY/WM_NCDESTROY must not touch
+     * imgui (0xC000041D in this proc otherwise). */
+    if (!ImGui_GetCurrentContext())
+        return DefWGLWindowProc(hWnd, uMsg, wParam, lParam);
+
     ImGuiViewport* viewport = ImGui_FindViewportByPlatformHandle((void*)hWnd);
     if (viewport == ImGui_GetMainViewport() && uMsg == WM_CLOSE)
     {
-        DestroyWindow(hWnd);
+        /* Quit through the render loop's teardown: the secondary platform
+         * windows must be destroyed BEFORE this window — every viewport
+         * renders and presents through THIS window's GL context (g_hRC).
+         * DestroyWindow here deleted that shared context under the live
+         * secondary presenters (CoreMessaging fail-fast). */
+        PostQuitMessage(0);
         return 0;
     }
 
@@ -407,6 +418,8 @@ wWinMain(
     for(;;)
     {
         SwitchToFiber(hMsgFiber);
+        if (WGLWindowQuitPosted())
+            break;
 
         /* draw() presents directly; no InvalidateRect — WM_PAINT is for
          * genuine exposure only. */
@@ -416,6 +429,7 @@ wWinMain(
 
     }
 
+    wglMakeCurrent(g_MainWindow.hDC, g_hRC);
     cImGui_ImplOpenGL3_Shutdown();
     cImGui_ImplWin32_Shutdown();
     ImGui_DestroyPlatformWindows();

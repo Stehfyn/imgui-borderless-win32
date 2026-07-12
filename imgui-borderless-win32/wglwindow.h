@@ -175,6 +175,10 @@ WINWGLWINDOWAPI BOOL WINAPI IsWGLWindowInSynchronousResizeRender(HWND hWnd);
 WINWGLWINDOWAPI HWND WINAPI GetWGLWindowSynchronousResizeHwnd(HWND hWnd);
 WINWGLWINDOWAPI BOOL WINAPI IsWGLWindowInModalSizeMove(HWND hWnd);
 WINWGLWINDOWAPI VOID WINAPI MessageFiberProc(void* unused);
+/* TRUE once the message fiber saw WM_QUIT; the render fiber runs its
+ * teardown (platform windows first, main window last) instead of the pump
+ * exiting the process. */
+WINWGLWINDOWAPI BOOL WINAPI WGLWindowQuitPosted(VOID);
 WINWGLWINDOWAPI LRESULT CALLBACK DefWGLWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 typedef struct DWMFRAME DWMFRAME;         /* dwmframe.h: caption chrome */

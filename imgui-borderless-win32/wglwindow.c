@@ -2036,6 +2036,13 @@ WINWGLWINDOWAPI BOOL WINAPI IsWGLWindowInModalSizeMove(HWND hWnd)
     return pwglSurf && pwglSurf->in_modal_size_move;
 }
 
+static BOOL quit_posted;
+
+WINWGLWINDOWAPI BOOL WINAPI WGLWindowQuitPosted(VOID)
+{
+    return quit_posted;
+}
+
 WINWGLWINDOWAPI VOID WINAPI MessageFiberProc(void* unused)
 {
     for (;;)
@@ -2044,11 +2051,21 @@ WINWGLWINDOWAPI VOID WINAPI MessageFiberProc(void* unused)
 
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE|PM_NOYIELD))
         {
+            /* Orderly quit: hand WM_QUIT back to the render fiber, whose
+             * teardown destroys the secondary platform windows BEFORE the
+             * main window (every viewport renders and presents through the
+             * main window's GL context).  ExitProcess from inside the pump
+             * ripped the presenters' composition channel down mid-flight —
+             * CoreMessaging fail-fast (0xC0000602) whenever a secondary
+             * viewport was still alive. */
+            if (msg.message == WM_QUIT)
+            {
+                quit_posted = TRUE;
+                break;
+            }
+
             TranslateMessage(&msg);
             DispatchMessage(&msg);
-
-            if (msg.message == WM_QUIT)
-                ExitProcess(0);
         }
 
         SwitchToFiber(unused);
