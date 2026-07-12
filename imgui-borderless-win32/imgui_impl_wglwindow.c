@@ -589,6 +589,21 @@ static LRESULT CALLBACK ImGui_ImplWGLWindow_WndProcHandler_PlatformWindow(HWND h
         case WM_SIZE:
             viewport->PlatformRequestResize = true;
             break;
+        case WM_WINDOWPOSCHANGED:
+        {
+            /* The WGLWindow control's WM_WINDOWPOSCHANGED path does NOT
+             * forward to DefWindowProc (its composition-swapchain branch
+             * generates no WM_MOVE/WM_SIZE), so the canonical cases above
+             * never fire for OS-driven changes — derive the request flags
+             * from the transaction itself.  The deferred-commit flush
+             * cancels its own echo right after its SetWindowPos returns. */
+            const WINDOWPOS* wp = (const WINDOWPOS*)lParam;
+            if (wp && !(wp->flags & SWP_NOMOVE))
+                viewport->PlatformRequestMove = true;
+            if (wp && !(wp->flags & SWP_NOSIZE))
+                viewport->PlatformRequestResize = true;
+            break;
+        }
         case WM_NCCALCSIZE:
             /* Seam 2, native drags: the window control renders this window
              * at the PENDING size inside this message (pre-geometry
