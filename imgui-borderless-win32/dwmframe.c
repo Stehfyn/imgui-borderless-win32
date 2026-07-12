@@ -22,11 +22,19 @@
 #endif
 
 #include <windows.h>
+#include <uxtheme.h>
+#include <shlwapi.h>
+#include <wincodec.h>
 #include <gl/gl.h>
 
 #include "dwmframe.h"
 
 #pragma comment(lib, "opengl32")
+#pragma comment(lib, "uxtheme")
+#pragma comment(lib, "shlwapi")
+#pragma comment(lib, "ole32")
+#pragma comment(lib, "uuid")
+#pragma comment(lib, "windowscodecs")
 
 #ifndef GL_BGRA_EXT
 #define GL_BGRA_EXT       0x80E1
@@ -161,6 +169,19 @@ static DWFCOLOR DwfCaptionColor(BOOL fDark, BOOL fActive)
     else
       cr = fActive ? RGB(0xF3, 0xF3, 0xF3) : RGB(0xFB, 0xFB, 0xFB);
     return DwfColor(cr);
+}
+
+/* Non-close caption-button highlight fills (hover / pressed).  Crossfaded by
+ * the caller like the band and glyphs — an instant flip stands out against
+ * the still-fading caption. */
+static DWFCOLOR DwfBtnHotColor(BOOL fDark)
+{
+    return DwfColor(fDark ? RGB(0x3D, 0x3D, 0x3D) : RGB(0xE9, 0xE9, 0xE9));
+}
+
+static DWFCOLOR DwfBtnPressColor(BOOL fDark)
+{
+    return DwfColor(fDark ? RGB(0x50, 0x50, 0x50) : RGB(0xCC, 0xCC, 0xCC));
 }
 
 static UINT DwfDpi(HWND hwnd)
@@ -544,6 +565,203 @@ static BOOL DwfRasterizeTitle(DWMFRAME* f, LPCWSTR psz, int cch, COLORREF crText
     return TRUE;
 }
 
+/* ---- DWM msstyles atlas glyphs (min/max/restore/close) ----------------------------------------------
+ * The REAL composed-caption glyphs: the DWMWindow class in the active
+ * .msstyles carries uDWM's frame atlas as a disk stream, and its parts
+ * address the atlas through TMT_ATLASRECT.  Measured (atlasmap 2026-07-12,
+ * Aero.msstyles 19045): glyph families are one part per DPI rung
+ * (96/120/144/192) — close 11-14, max 19-22, min 23-26, restore 27-30 —
+ * each part rect a strip of 4 stacked state cells (black active/inactive,
+ * white active/inactive).  The blackest full-alpha cell's ALPHA becomes the
+ * GL mask (the black and white variants share coverage), so the existing
+ * DwfGlyphColor tint pipeline stays.  Sun/moon are not in the atlas; any
+ * miss here falls back to the glyph font. */
+
+#define DWF_TMT_ATLASRECT  8002
+#define DWF_TMT_DISKSTREAM 213
+
+static int DwfAtlasPartForDpi(int partBase96, UINT dpi)
+{
+    if (dpi <= 96)  return partBase96;
+    if (dpi <= 120) return partBase96 + 1;
+    if (dpi <= 144) return partBase96 + 2;
+    return partBase96 + 3;
+}
+
+/* Decode the DWMWindow disk-stream PNG to BGRA through WIC.  Returns a
+ * HeapAlloc'd buffer (caller frees) or NULL. */
+static BYTE* DwfLoadDwmAtlas(HTHEME hTheme, int* pcx, int* pcy)
+{
+    WCHAR    szTheme[MAX_PATH];
+    HMODULE  hStyles;
+    VOID*    pvPng = NULL;
+    DWORD    cbPng = 0;
+    IStream* pStream = NULL;
+    IWICImagingFactory*    pFactory   = NULL;
+    IWICBitmapDecoder*     pDecoder   = NULL;
+    IWICBitmapFrameDecode* pFrame     = NULL;
+    IWICFormatConverter*   pConverter = NULL;
+    UINT     w = 0;
+    UINT     h = 0;
+    BYTE*    pBgra = NULL;
+    BOOL     ok = FALSE;
+
+    szTheme[0] = 0;
+    if (FAILED(GetCurrentThemeName(szTheme, MAX_PATH, NULL, 0, NULL, 0)) || !szTheme[0])
+      return NULL;
+    hStyles = LoadLibraryExW(szTheme, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (!hStyles)
+      return NULL;
+    if (FAILED(GetThemeStream(hTheme, 0, 0, DWF_TMT_DISKSTREAM,
+                              &pvPng, &cbPng, hStyles)) || !pvPng || !cbPng)
+    {
+      (void)FreeLibrary(hStyles);
+      return NULL;
+    }
+
+    (void)CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    pStream = SHCreateMemStream((const BYTE*)pvPng, cbPng);
+    if (pStream &&
+        SUCCEEDED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                                   &IID_IWICImagingFactory, (void**)&pFactory)) &&
+        SUCCEEDED(pFactory->lpVtbl->CreateDecoderFromStream(pFactory, pStream, NULL,
+                                                            WICDecodeMetadataCacheOnDemand, &pDecoder)) &&
+        SUCCEEDED(pDecoder->lpVtbl->GetFrame(pDecoder, 0, &pFrame)) &&
+        SUCCEEDED(pFactory->lpVtbl->CreateFormatConverter(pFactory, &pConverter)) &&
+        SUCCEEDED(pConverter->lpVtbl->Initialize(pConverter, (IWICBitmapSource*)pFrame,
+                                                 &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone,
+                                                 NULL, 0.0, WICBitmapPaletteTypeCustom)) &&
+        SUCCEEDED(pConverter->lpVtbl->GetSize(pConverter, &w, &h)) && w && h)
+    {
+      pBgra = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * h * 4u);
+      if (pBgra &&
+          SUCCEEDED(pConverter->lpVtbl->CopyPixels(pConverter, NULL, w * 4u,
+                                                   w * h * 4u, pBgra)))
+        ok = TRUE;
+    }
+    if (pConverter) pConverter->lpVtbl->Release(pConverter);
+    if (pFrame)     pFrame->lpVtbl->Release(pFrame);
+    if (pDecoder)   pDecoder->lpVtbl->Release(pDecoder);
+    if (pFactory)   pFactory->lpVtbl->Release(pFactory);
+    if (pStream)    pStream->lpVtbl->Release(pStream);
+    (void)FreeLibrary(hStyles);
+
+    if (!ok)
+    {
+      if (pBgra)
+        HeapFree(GetProcessHeap(), 0, pBgra);
+      return NULL;
+    }
+    *pcx = (int)w;
+    *pcy = (int)h;
+    return pBgra;
+}
+
+/* One glyph from the atlas: TMT_ATLASRECT strip -> 4 state cells -> the
+ * LIGHTEST cell with (near-)full alpha (the white/dark-caption variant:
+ * the black variants bake a drop shadow for light captions, which fattens
+ * the mask by a pixel and reads bolder than native) -> bbox-trimmed alpha
+ * mask. */
+static BOOL DwfGlyphFromAtlas(const BYTE* pAtlas, int aw, int ah, HTHEME hTheme,
+                              int part, DWFTEX* pTex)
+{
+    RECT rc;
+    int  cellH;
+    int  best = -1;
+    double bestLuma = -1.0;
+    int  c;
+
+    if (FAILED(GetThemeRect(hTheme, part, 0, DWF_TMT_ATLASRECT, &rc)))
+      return FALSE;
+    if (rc.left < 0 || rc.top < 0 || rc.right > aw || rc.bottom > ah || rc.right <= rc.left)
+      return FALSE;
+    cellH = (rc.bottom - rc.top) / 4;
+    if (cellH <= 0)
+      return FALSE;
+
+    for (c = 0; c < 4; ++c)
+    {
+      double luma = 0.0, alpha = 0.0;
+      int    n = 0, x, y;
+      for (y = rc.top + c * cellH; y < rc.top + (c + 1) * cellH; ++y)
+        for (x = rc.left; x < rc.right; ++x)
+        {
+          const BYTE* px = pAtlas + ((SIZE_T)y * aw + x) * 4u;
+          if (px[3] <= 24) continue;
+          luma  += (px[0] + px[1] + px[2]) / 3.0;
+          alpha += px[3];
+          ++n;
+        }
+      if (!n) continue;
+      luma /= n; alpha /= n;
+      if (alpha >= 180.0 && luma > bestLuma)
+      {
+        bestLuma = luma;
+        best = c;
+      }
+    }
+    if (best < 0)
+      return FALSE;
+
+    {
+      /* bbox-trim (alpha > 8), then upload the coverage as a GL_ALPHA mask */
+      int l = rc.right, r = rc.left - 1, t = rc.top + (best + 1) * cellH, b = rc.top + best * cellH - 1;
+      int x, y, w, h;
+      BYTE* pMask;
+      for (y = rc.top + best * cellH; y < rc.top + (best + 1) * cellH; ++y)
+        for (x = rc.left; x < rc.right; ++x)
+          if (pAtlas[((SIZE_T)y * aw + x) * 4u + 3] > 8)
+          {
+            if (x < l) l = x;
+            if (x > r) r = x;
+            if (y < t) t = y;
+            if (y > b) b = y;
+          }
+      if (r < l || b < t)
+        return FALSE;
+      w = r - l + 1;
+      h = b - t + 1;
+      pMask = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * h);
+      if (!pMask)
+        return FALSE;
+      for (y = 0; y < h; ++y)
+        for (x = 0; x < w; ++x)
+          pMask[(SIZE_T)y * w + x] = pAtlas[((SIZE_T)(t + y) * aw + (l + x)) * 4u + 3];
+      DwfTexFromAlpha(pTex, pMask, w, h);
+      HeapFree(GetProcessHeap(), 0, pMask);
+    }
+    return pTex->id != 0;
+}
+
+/* Min/max/restore/close from the DWMWindow atlas at the window's dpi rung.
+ * Any failure leaves the slots empty for the font fallback. */
+static void DwfBuildAtlasGlyphs(DWMFRAME* f, UINT dpi)
+{
+    static const struct { int slot; int partBase96; } c_map[] = {
+        { DWFG_CLOSE,   11 },
+        { DWFG_MAX,     19 },
+        { DWFG_MIN,     23 },
+        { DWFG_RESTORE, 27 },
+    };
+    HTHEME hTheme;
+    BYTE*  pAtlas;
+    int    aw = 0, ah = 0, i;
+
+    hTheme = OpenThemeData(NULL, L"DWMWindow");
+    if (!hTheme)
+      return;
+    pAtlas = DwfLoadDwmAtlas(hTheme, &aw, &ah);
+    if (pAtlas)
+    {
+      for (i = 0; i < (int)(sizeof(c_map) / sizeof(c_map[0])); ++i)
+        (void)DwfGlyphFromAtlas(pAtlas, aw, ah, hTheme,
+                                DwfAtlasPartForDpi(c_map[i].partBase96, dpi),
+                                &f->texGlyph[c_map[i].slot]);
+      HeapFree(GetProcessHeap(), 0, pAtlas);
+    }
+    (void)CloseThemeData(hTheme);
+}
+
 /* Icon glyph font: Segoe Fluent Icons (Win11) / Segoe MDL2 Assets (Win10) --
  * the same glyphs uDWM bakes into its button atlas.  pxSize is the exact
  * pixel size to rasterize at (callers pass the supersampled size). */
@@ -611,15 +829,21 @@ static void DwfEnsureChromeAssets(DWMFRAME* f, HWND hwnd)
 
     if (!f->texGlyph[DWFG_CLOSE].id)
     {
-      /* Native uDWM caption glyph size: a 10-DIP em (NOT a caption-height
-       * fraction — the SM-stack caption is taller than the shell's 30-DIP
-       * design height and inflates the glyphs).  Rasterized supersampled;
-       * the box filter reduces to 1:1. */
-      HFONT hFont = DwfCreateIconFont(MulDiv(10, (int)dpi, 96) * DWF_GLYPH_SS);
+      /* Min/max/restore/close from the real uDWM msstyles atlas
+       * (DarkMode/light variants share coverage; the mask is tinted at
+       * draw).  Sun/moon — and any atlas miss — from the glyph font at the
+       * native 10-DIP em (NOT a caption-height fraction — the SM-stack
+       * caption is taller than the shell's 30-DIP design height and
+       * inflates the glyphs).  Rasterized supersampled; the box filter
+       * reduces to 1:1. */
+      HFONT hFont;
+      DwfBuildAtlasGlyphs(f, dpi);
+      hFont = DwfCreateIconFont(MulDiv(10, (int)dpi, 96) * DWF_GLYPH_SS);
       if (hFont)
       {
         for (i = 0; i < DWFG_COUNT; ++i)
-          (void)DwfRasterizeTextAlpha(hFont, &c_dwfGlyphCp[i], 1, &f->texGlyph[i]);
+          if (!f->texGlyph[i].id)
+            (void)DwfRasterizeTextAlpha(hFont, &c_dwfGlyphCp[i], 1, &f->texGlyph[i]);
         (void)DeleteObject(hFont);
       }
     }
@@ -731,28 +955,27 @@ static void DwfDrawTexGL(const DWFTEX* pTex, float x, float y, float w, float h,
 
 /* One caption button: hover/press highlight (alpha-faded by flHover, the
  * per-button 160ms opacity) + the glyph mask centered in the cell.  Close's
- * glyph cross-fades to white as its red highlight fades in. */
+ * glyph cross-fades to white as its red highlight fades in.  cfHot/cfPress
+ * arrive crossfaded on the shared theme timeline (an instant fill flip
+ * stands out against the still-fading band); Close's red is theme-fixed. */
 static void DwfDrawButton(DWMFRAME* f, const RECT* prc, int id, const DWFTEX* pGlyph,
-                          BOOL fDark, DWFCOLOR cfGlyph, float flHover)
+                          DWFCOLOR cfHot, DWFCOLOR cfPress, DWFCOLOR cfGlyph, float flHover)
 {
     BOOL     fPressed = (f->idPressed == id);
-    COLORREF crFill;
     DWFCOLOR cf;
 
     if (DWB_CLOSE == id)
     {
-      crFill  = fPressed ? RGB(0xC8, 0x3C, 0x2F) : RGB(0xC4, 0x2B, 0x1C);
+      cf      = DwfColor(fPressed ? RGB(0xC8, 0x3C, 0x2F) : RGB(0xC4, 0x2B, 0x1C));
       cfGlyph = DwfLerp(cfGlyph, DwfColor(RGB(255, 255, 255)), flHover);
     }
     else
     {
-      crFill = fPressed ? (fDark ? RGB(0x50, 0x50, 0x50) : RGB(0xCC, 0xCC, 0xCC))
-                        : (fDark ? RGB(0x3D, 0x3D, 0x3D) : RGB(0xE9, 0xE9, 0xE9));
+      cf = fPressed ? cfPress : cfHot;
     }
 
     if (flHover > 0.001f)
     {
-      cf   = DwfColor(crFill);
       cf.a = flHover;
       DwfFillRectGL((float)prc->left, (float)prc->top, (float)prc->right, (float)prc->bottom, cf);
     }
@@ -775,6 +998,8 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
     DWFCOLOR colCap;
     DWFCOLOR colText;
     DWFCOLOR colGlyph;
+    DWFCOLOR colBtnHot;
+    DWFCOLOR colBtnPress;
     DWFCOLOR colWhite;
 
     if (!f || cx <= 0 || cy <= 0)
@@ -790,9 +1015,11 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
       BOOL  fAc1 = f->fAnim ? f->fActiveFrom : fActive;
       float t    = f->fAnim ? f->flAnimT     : 1.0f;
 
-      colCap   = DwfLerp(DwfCaptionColor(fDk1, fAc1), DwfCaptionColor(fDark, fActive), t);
-      colText  = DwfLerp(DwfTextColor(fDk1, fAc1),    DwfTextColor(fDark, fActive),    t);
-      colGlyph = DwfLerp(DwfGlyphColor(fDk1, fAc1),   DwfGlyphColor(fDark, fActive),   t);
+      colCap      = DwfLerp(DwfCaptionColor(fDk1, fAc1), DwfCaptionColor(fDark, fActive), t);
+      colText     = DwfLerp(DwfTextColor(fDk1, fAc1),    DwfTextColor(fDark, fActive),    t);
+      colGlyph    = DwfLerp(DwfGlyphColor(fDk1, fAc1),   DwfGlyphColor(fDark, fActive),   t);
+      colBtnHot   = DwfLerp(DwfBtnHotColor(fDk1),        DwfBtnHotColor(fDark),           t);
+      colBtnPress = DwfLerp(DwfBtnPressColor(fDk1),      DwfBtnPressColor(fDark),         t);
     }
     colWhite.r = colWhite.g = colWhite.b = colWhite.a = 1.0f;
 
@@ -881,10 +1108,10 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
 
       if (DwfButtonRects(hwnd, cx, &rcClose, &rcMax, &rcMin, &rcLD))
       {
-        DwfDrawButton(f, &rcLD,    DWB_LIGHTDARK, &f->texGlyph[fDark ? DWFG_SUN : DWFG_MOON],          fDark, colGlyph, f->flBtnOpacity[DWB_LIGHTDARK]);
-        DwfDrawButton(f, &rcMin,   DWB_MIN,       &f->texGlyph[DWFG_MIN],                              fDark, colGlyph, f->flBtnOpacity[DWB_MIN]);
-        DwfDrawButton(f, &rcMax,   DWB_MAX,       &f->texGlyph[IsZoomed(hwnd) ? DWFG_RESTORE : DWFG_MAX], fDark, colGlyph, f->flBtnOpacity[DWB_MAX]);
-        DwfDrawButton(f, &rcClose, DWB_CLOSE,     &f->texGlyph[DWFG_CLOSE],                            fDark, colGlyph, f->flBtnOpacity[DWB_CLOSE]);
+        DwfDrawButton(f, &rcLD,    DWB_LIGHTDARK, &f->texGlyph[fDark ? DWFG_SUN : DWFG_MOON],          colBtnHot, colBtnPress, colGlyph, f->flBtnOpacity[DWB_LIGHTDARK]);
+        DwfDrawButton(f, &rcMin,   DWB_MIN,       &f->texGlyph[DWFG_MIN],                              colBtnHot, colBtnPress, colGlyph, f->flBtnOpacity[DWB_MIN]);
+        DwfDrawButton(f, &rcMax,   DWB_MAX,       &f->texGlyph[IsZoomed(hwnd) ? DWFG_RESTORE : DWFG_MAX], colBtnHot, colBtnPress, colGlyph, f->flBtnOpacity[DWB_MAX]);
+        DwfDrawButton(f, &rcClose, DWB_CLOSE,     &f->texGlyph[DWFG_CLOSE],                            colBtnHot, colBtnPress, colGlyph, f->flBtnOpacity[DWB_CLOSE]);
       }
     }
 
@@ -1200,6 +1427,23 @@ VOID WINAPI DwmFrameSetThemeCallback(DWMFRAME* f, DWMFRAMETHEMEPROC pfnTheme)
 {
     if (f)
       f->pfnTheme = pfnTheme;
+}
+
+VOID WINAPI DwmFrameGetThemeAnim(DWMFRAME* f, BOOL* pfDarkTo, BOOL* pfDarkFrom, float* pflT)
+{
+    BOOL  fTo   = TRUE;
+    BOOL  fFrom = TRUE;
+    float t     = 1.0f;
+
+    if (f)
+    {
+      fTo   = f->fDark;
+      fFrom = f->fAnim ? f->fDarkFrom : f->fDark;
+      t     = f->fAnim ? f->flAnimT   : 1.0f;
+    }
+    if (pfDarkTo)   *pfDarkTo   = fTo;
+    if (pfDarkFrom) *pfDarkFrom = fFrom;
+    if (pflT)       *pflT       = t;
 }
 
 VOID WINAPI DwmFrameShowSystemMenu(DWMFRAME* f, HWND hwnd, int xScreen, int yScreen)

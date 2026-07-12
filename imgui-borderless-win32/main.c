@@ -55,7 +55,7 @@ static void (*g_Win32_Platform_DestroyWindow)(ImGuiViewport* viewport);
 static void (*g_OpenGL_Renderer_RenderWindow)(ImGuiViewport* viewport, void* user_data);
 
 static void Hook_RenderPlatformWindows(HWND priority_hwnd);
-static void ThemeAnimTick(void);
+static void ThemeAnimTick(HWND hWnd);
 
 static void draw(HWND hWnd)
 {
@@ -70,7 +70,7 @@ static void draw(HWND hWnd)
   if (pwglSurfFrame)
     pwglSurfFrame->in_frame = TRUE;
 
-  ThemeAnimTick();
+  ThemeAnimTick(hWnd);
   cImGui_ImplOpenGL3_NewFrame();
   cImGui_ImplWin32_NewFrame();
 
@@ -166,67 +166,55 @@ static void draw(HWND hWnd)
   PresentWGLWindow(hWnd);
 }
 
-/* Light/dark caption-button commit (dwmframe theme seam): don't snap the
- * imgui style — crossfade it on the SAME timeline as the chrome (dwmframe's
- * 160ms linear caption fade starts on this same tick), so the content always
- * matches the caption mid-transition.  Colors only — sizes/scales stay. */
-#define THEME_ANIM_DURATION 160u   /* dwmframe DWF_ANIM_DURATION */
-
-static struct
+/* Light/dark theme (dwmframe seam): the imgui style colors are SLAVED to
+ * the chrome's own 160ms crossfade — dwmframe owns the timeline, this just
+ * reads (from, to, t) each frame and blends the two palettes — so the
+ * content always matches the caption mid-transition, with no animation
+ * state of its own.  Colors only — sizes/scales stay.  Skipped while the
+ * blend inputs are unchanged, so runtime style-color edits survive outside
+ * transitions. */
+static void ThemeAnimTick(HWND hWnd)
 {
-    BOOL   fActive;
-    DWORD  dwStart;
-    ImVec4 from[ImGuiCol_COUNT];
-    ImVec4 to[ImGuiCol_COUNT];
-} g_ThemeAnim;
+    static ImGuiStyle dark;    /* palettes, built once (large: off-stack) */
+    static ImGuiStyle light;
+    static BOOL  fBuilt;
+    static BOOL  fToLast   = -1;
+    static BOOL  fFromLast = -1;
+    static float tLast     = -1.0f;
 
-static void WINAPI ApplyImGuiTheme(HWND hWnd, BOOL fDark)
-{
-    static ImGuiStyle target;   /* colors fully overwritten below; off-stack (large) */
-    ImGuiStyle* style = ImGui_GetStyle();
-    int i;
-
-    UNREFERENCED_PARAMETER(hWnd);
-    if (fDark)
-      ImGui_StyleColorsDark(&target);
-    else
-      ImGui_StyleColorsLight(&target);
-
-    /* From the LIVE colors: a mid-fade re-press reverses smoothly, exactly
-     * like the chrome's crossfade. */
-    for (i = 0; i < ImGuiCol_COUNT; ++i)
-    {
-      g_ThemeAnim.from[i] = style->Colors[i];
-      g_ThemeAnim.to[i]   = target.Colors[i];
-    }
-    g_ThemeAnim.dwStart = GetTickCount();
-    g_ThemeAnim.fActive = TRUE;
-}
-
-/* Per-frame: advance the style crossfade (linear, like dwmframe's). */
-static void ThemeAnimTick(void)
-{
+    WGLSURFACE* pwglSurf = (WGLSURFACE*)GetWindowLongPtr(hWnd, 0);
     ImGuiStyle* style;
+    BOOL  fTo;
+    BOOL  fFrom;
     float t;
     int   i;
 
-    if (!g_ThemeAnim.fActive)
+    if (!pwglSurf || !pwglSurf->frame)
       return;
 
-    t = (float)(GetTickCount() - g_ThemeAnim.dwStart) / (float)THEME_ANIM_DURATION;
-    if (t >= 1.0f)
+    if (!fBuilt)
     {
-      t = 1.0f;
-      g_ThemeAnim.fActive = FALSE;
+      ImGui_StyleColorsDark(&dark);
+      ImGui_StyleColorsLight(&light);
+      fBuilt = TRUE;
     }
+
+    DwmFrameGetThemeAnim(pwglSurf->frame, &fTo, &fFrom, &t);
+    if (fTo == fToLast && fFrom == fFromLast && t == tLast)
+      return;
+    fToLast   = fTo;
+    fFromLast = fFrom;
+    tLast     = t;
 
     style = ImGui_GetStyle();
     for (i = 0; i < ImGuiCol_COUNT; ++i)
     {
-      style->Colors[i].x = g_ThemeAnim.from[i].x + (g_ThemeAnim.to[i].x - g_ThemeAnim.from[i].x) * t;
-      style->Colors[i].y = g_ThemeAnim.from[i].y + (g_ThemeAnim.to[i].y - g_ThemeAnim.from[i].y) * t;
-      style->Colors[i].z = g_ThemeAnim.from[i].z + (g_ThemeAnim.to[i].z - g_ThemeAnim.from[i].z) * t;
-      style->Colors[i].w = g_ThemeAnim.from[i].w + (g_ThemeAnim.to[i].w - g_ThemeAnim.from[i].w) * t;
+      const ImVec4* a = fFrom ? &dark.Colors[i] : &light.Colors[i];
+      const ImVec4* b = fTo   ? &dark.Colors[i] : &light.Colors[i];
+      style->Colors[i].x = a->x + (b->x - a->x) * t;
+      style->Colors[i].y = a->y + (b->y - a->y) * t;
+      style->Colors[i].z = a->z + (b->z - a->z) * t;
+      style->Colors[i].w = a->w + (b->w - a->w) * t;
     }
 }
 
@@ -409,9 +397,6 @@ wWinMain(
     int quit = 0;
 
     SubclassWindow(hwnd, ImGuiSubclassProc);
-
-    if (pwglSurf->frame)
-      DwmFrameSetThemeCallback(pwglSurf->frame, ApplyImGuiTheme);
 
     g_ClientRenderFunction = draw;
 

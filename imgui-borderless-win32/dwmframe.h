@@ -44,6 +44,11 @@ VOID WINAPI DwmFrameDestroy(DWMFRAME* f);
 typedef VOID (WINAPI* DWMFRAMETHEMEPROC)(HWND hwnd, BOOL fDark);
 VOID WINAPI DwmFrameSetThemeCallback(DWMFRAME* f, DWMFRAMETHEMEPROC pfnTheme);
 
+/* Theme crossfade state, for slaving app colors to the chrome's exact
+ * timeline: the from/to dark flags and the shared 160ms progress (1.0 when
+ * idle; from == to outside a theme transition). */
+VOID WINAPI DwmFrameGetThemeAnim(DWMFRAME* f, BOOL* pfDarkTo, BOOL* pfDarkFrom, float* pflT);
+
 /* Draws the caption chrome with OpenGL into the current GL context's draw
  * buffer, in window coordinates, over the (cx, cy) client-sized frame.  Call
  * after the client content is rendered, before the present. */
