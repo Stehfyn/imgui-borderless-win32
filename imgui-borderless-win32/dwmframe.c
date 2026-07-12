@@ -268,8 +268,12 @@ static void DwfTexFromAlpha(DWFTEX* pTex, const BYTE* pAlpha, int w, int h)
     pTex->h = h;
 }
 
-/* White-on-black grayscale-AA GDI text -> GL_ALPHA mask texture; the draw
- * tints it with the vertex color (GL_MODULATE). */
+/* White-on-black grayscale-AA GDI text, rasterized at DWF_GLYPH_SS x the
+ * target size (the caller's font is already supersampled) and box-filtered
+ * down on the CPU to a 1:1 GL_ALPHA mask: every output pixel is the exact
+ * SSxSS coverage average.  (GPU LINEAR minification at 4:1 reads only 4 of
+ * the 16 source texels — undersampling, not smoothing.)  The draw tints the
+ * mask with the vertex color (GL_MODULATE). */
 static BOOL DwfRasterizeTextAlpha(HFONT hFont, LPCWSTR psz, int cch, DWFTEX* pTex)
 {
     HDC        hdcScreen;
@@ -283,7 +287,8 @@ static BOOL DwfRasterizeTextAlpha(HFONT hFont, LPCWSTR psz, int cch, DWFTEX* pTe
     SIZE       ext;
     int        w;
     int        h;
-    int        i;
+    int        lw;
+    int        lh;
     BOOL       ok = FALSE;
 
     DwfFreeTex(pTex);
@@ -303,10 +308,14 @@ static BOOL DwfRasterizeTextAlpha(HFONT hFont, LPCWSTR psz, int cch, DWFTEX* pTe
     (void)GetTextExtentPoint32W(hdcMem, psz, cch, &ext);
     w = (int)ext.cx;
     h = (int)ext.cy;
-    if (w < 1) w = 1;
-    if (h < 1) h = 1;
-    if (w > 2048) w = 2048;
-    if (h > 512)  h = 512;
+    if (w < DWF_GLYPH_SS) w = DWF_GLYPH_SS;
+    if (h < DWF_GLYPH_SS) h = DWF_GLYPH_SS;
+    if (w > 8192) w = 8192;
+    if (h > 1024) h = 1024;
+    w -= w % DWF_GLYPH_SS;                      /* exact SSxSS blocks */
+    h -= h % DWF_GLYPH_SS;
+    lw = w / DWF_GLYPH_SS;
+    lh = h / DWF_GLYPH_SS;
 
     ZeroMemory(&bmi, sizeof(bmi));
     bmi.bmiHeader.biSize        = sizeof(bmi.bmiHeader);
@@ -328,13 +337,33 @@ static BOOL DwfRasterizeTextAlpha(HFONT hFont, LPCWSTR psz, int cch, DWFTEX* pTe
       (void)GdiFlush();
       (void)SelectObject(hdcMem, hOldBmp);
 
-      pAlpha = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * (SIZE_T)h);
+      pAlpha = (BYTE*)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)lw * (SIZE_T)lh);
       if (pAlpha)
       {
         const BYTE* src = (const BYTE*)pBits;
-        for (i = 0; i < w * h; ++i)
-          pAlpha[i] = src[i * 4 + 1];           /* green carries the grayscale coverage */
-        DwfTexFromAlpha(pTex, pAlpha, w, h);
+        int         ox;
+        int         oy;
+
+        for (oy = 0; oy < lh; ++oy)
+        {
+          for (ox = 0; ox < lw; ++ox)
+          {
+            UINT sum = 0;
+            int  sx;
+            int  sy;
+
+            for (sy = 0; sy < DWF_GLYPH_SS; ++sy)
+            {
+              const BYTE* row = src + (((SIZE_T)(oy * DWF_GLYPH_SS + sy) * (SIZE_T)w +
+                                        (SIZE_T)(ox * DWF_GLYPH_SS)) * 4u);
+              for (sx = 0; sx < DWF_GLYPH_SS; ++sx)
+                sum += row[sx * 4 + 1];         /* green carries the grayscale coverage */
+            }
+            pAlpha[(SIZE_T)oy * (SIZE_T)lw + (SIZE_T)ox] =
+                (BYTE)(sum / (DWF_GLYPH_SS * DWF_GLYPH_SS));
+          }
+        }
+        DwfTexFromAlpha(pTex, pAlpha, lw, lh);
         HeapFree(GetProcessHeap(), 0, pAlpha);
         ok = (pTex->id != 0);
       }
@@ -348,7 +377,10 @@ static BOOL DwfRasterizeTextAlpha(HFONT hFont, LPCWSTR psz, int cch, DWFTEX* pTe
 }
 
 /* System caption font at the window's dpi (the same font uDWM titles with),
- * grayscale-AA so the mask carries clean coverage. */
+ * grayscale-AA so the mask carries clean coverage.  The height is scaled by
+ * DWF_GLYPH_SS: the title rasterizes supersampled and draws at 1:1 scale-
+ * down, same as the button glyphs (GDI grayscale AA at caption sizes is
+ * visibly quantized). */
 static HFONT DwfCreateCaptionFont(UINT dpi)
 {
     static NONCLIENTMETRICSW ncm;   /* ~500 bytes: off-stack, GUI thread only (reference remedy) */
@@ -358,6 +390,8 @@ static HFONT DwfCreateCaptionFont(UINT dpi)
     if (!SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(ncm), &ncm, 0, dpi) &&
         !SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, (UINT)sizeof(ncm), &ncm, 0))
       return NULL;
+    ncm.lfCaptionFont.lfHeight  = ncm.lfCaptionFont.lfHeight * DWF_GLYPH_SS;
+    ncm.lfCaptionFont.lfWidth   = 0;
     ncm.lfCaptionFont.lfQuality = ANTIALIASED_QUALITY;
     return CreateFontIndirectW(&ncm.lfCaptionFont);
 }
@@ -588,13 +622,11 @@ static void DwfDrawButton(DWMFRAME* f, const RECT* prc, int id, const DWFTEX* pG
 
     if (pGlyph && pGlyph->id)
     {
-      /* Draw at 1/DWF_GLYPH_SS of the supersampled mask, integer-snapped:
-       * half-pixel placement under LINEAR filtering doubles every edge. */
-      int gw = pGlyph->w / DWF_GLYPH_SS;
-      int gh = pGlyph->h / DWF_GLYPH_SS;
-      int gx = prc->left + ((prc->right - prc->left) - gw) / 2;
-      int gy = prc->top  + ((prc->bottom - prc->top) - gh) / 2;
-      DwfDrawTexGL(pGlyph, (float)gx, (float)gy, (float)gw, (float)gh, cfGlyph);
+      /* The mask is already box-filtered to 1:1; draw at native size,
+       * integer-snapped (half-pixel placement under LINEAR doubles edges). */
+      int gx = prc->left + ((prc->right - prc->left) - pGlyph->w) / 2;
+      int gy = prc->top  + ((prc->bottom - prc->top) - pGlyph->h) / 2;
+      DwfDrawTexGL(pGlyph, (float)gx, (float)gy, (float)pGlyph->w, (float)pGlyph->h, cfGlyph);
     }
 }
 
@@ -668,8 +700,8 @@ VOID WINAPI DwmFrameDrawChrome(DWMFRAME* f, HWND hwnd, int cx, int cy)
     }
 
     /* Caption title (system caption font); starts one caption-height in
-     * (xxxDrawCaptionTemp: rc.left += capH for the icon slot).  Integer-
-     * snapped: fractional placement under LINEAR filtering blurs the text. */
+     * (xxxDrawCaptionTemp: rc.left += capH for the icon slot).  The mask is
+     * box-filtered to 1:1; draw at native size, integer-snapped. */
     if (f->texTitle.id)
     {
       int ty = (capH - f->texTitle.h) / 2;
