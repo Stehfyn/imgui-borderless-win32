@@ -8,6 +8,9 @@ extern "C"{
 #include <vssym32.h>
 #include <Uxtheme.h>
 #include <GL/gl.h>
+#ifndef GL_MULTISAMPLE
+#define GL_MULTISAMPLE 0x809D
+#endif
 #include <versionhelpers.h>
 #include "win32_window.h"
 #include "win32_helpers.h"
@@ -15,8 +18,6 @@ extern "C"{
 #include "stephs_types.h"
 #include "swcadef.h"      // Courtesy of https://gist.github.com/sylveon/9c199bb6684fe7dffcba1e3d383fb609
 #include <string.h>
-#include <GL\glext.h>
-//#include <GL\wglext.h>
 }
 #pragma comment (lib, "opengl32")
 #pragma comment (lib, "glu32")
@@ -98,7 +99,7 @@ int APIENTRY wWinMain(
     UNREFERENCED_PARAMETER(nCmdShow);
     (VOID)win32_set_timer_resolution(5000, TRUE, NULL);
     g_IRTimer = win32_create_high_resolution_timer(NULL, NULL, TIMER_ALL_ACCESS);
-    ImGui_ImplWin32_EnableDpiAwareness();
+    //ImGui_ImplWin32_EnableDpiAwareness();
     DwmEnableMMCSS(TRUE);
     g_pfMSAA = win32_wgl_get_pixel_format(4);
     g_WindowMessageLogCounter.SetMsgMap(WMMsgMap);
